@@ -1,0 +1,10 @@
+# 忽略实验数据和日志
+*.npy
+*.pth
+*.log
+checkpoints/
+results/
+
+# 忽略 Python 缓存
+__pycache__/
+.ipynb_checkpoints/
