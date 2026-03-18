@@ -1,10 +1,20 @@
-# 忽略实验数据和日志
-*.npy
-*.pth
-*.log
-checkpoints/
-results/
+# Training outputs
+outputs/
 
-# 忽略 Python 缓存
+# Python cache
 __pycache__/
+*.py[cod]
 .ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor cache
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -81,10 +81,10 @@ def forward_each_layer(x: jnp.ndarray,
 
 
 '''this part is for debugging the chebyshev polynomial basis functions.'''
-seed = 23
-key = jax.random.PRNGKey(seed)
-input = jnp.array([[0.1, 0.2, 0.1,], [0.2, 0.2, 0.2,]])
-params = init_chebyshev(key, 3, 4, 5,)
-output = forward_each_layer(x=input, n_in=3, n_out=4, d=5,
-                            c_basis = params['c_basis'], c_ext = params['c_ext'], bias = params['bias'], c_res = params['c_res'] )
-jax.debug.print("output:{}", output)
+# seed = 23
+# key = jax.random.PRNGKey(seed)
+# input = jnp.array([[0.1, 0.2, 0.1,], [0.2, 0.2, 0.2,]])
+# params = init_chebyshev(key, 3, 4, 5,)
+# output = forward_each_layer(x=input, n_in=3, n_out=4, d=5,
+#                             c_basis = params['c_basis'], c_ext = params['c_ext'], bias = params['bias'], c_res = params['c_res'] )
+# jax.debug.print("output:{}", output)

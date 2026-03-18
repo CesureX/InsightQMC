@@ -15,6 +15,7 @@ from jax import numpy as jnp
 import numpy as np
 import optax
 import pyscf
+from tqdm.auto import trange
 
 
 def get_hf(molecule: Optional[Sequence[system.Atom]] = None,
@@ -253,57 +254,22 @@ def pretrain_hartree_fock(
     charges: jnp.ndarray,
     batch_network,
     batch_orbitals,
-    #network_options: networks.BaseNetworkOptions,
     sharded_key: chex.PRNGKey,
     electrons: Tuple[int, int],
     scf_approx: scf.Scf,
     iterations: int = 1000,
     batch_size: int = 0,
     logger: Optional[Callable[[int, float], None]] = None,
+    checkpoint_callback: Optional[Callable[[int, float, networks.ParamTree, optax.OptState, networks.KANetsData, chex.PRNGKey], None]] = None,
     scf_fraction: float = 0.0,
     states: int = 0,
+    start_iteration: int = 0,
+    opt_state: Optional[optax.OptState] = None,
+    data: Optional[networks.KANetsData] = None,
 ):
-  """Performs training to match initialization as closely as possible to HF.
-
-  Args:
-    params: Network parameters.
-    positions: Electron position configurations.
-    spins: Electron spin configuration (1 for alpha electrons, -1 for beta), as
-      a 1D array. Note we always use the same spin configuration for the entire
-      batch in pretraining.
-    atoms: atom positions (batched).
-    charges: atomic charges (batched).
-    batch_network: callable with signature f(params, data), which given network
-      parameters and a batch of electron positions, returns the log of the
-      magnitude of the (wavefunction) network  evaluated at those positions.
-    batch_orbitals: callable with signature f(params, data), which given network
-      parameters and a batch of electron positions, returns the orbitals in the
-      network evaluated at those positions.
-    network_options: FermiNet network options.
-    sharded_key: JAX RNG state (sharded) per device.
-    electrons: tuple of number of electrons of each spin.
-    scf_approx: an scf.Scf object that contains the result of a PySCF
-      calculation.
-    iterations: number of pretraining iterations to perform.
-    batch_size: number of walkers per device, used to make MCMC step.
-    logger: Callable with signature (step, value) which externally logs the
-      pretraining loss.
-    scf_fraction: What fraction of the wavefunction sampled from is the SCF
-      wavefunction and what fraction is the neural network wavefunction?
-    states: Number of excited states, if not 0.
-
-  Returns:
-    params, positions: Updated network parameters and MCMC configurations such
-    that the orbitals in the network closely match Hartree-Fock and the MCMC
-    configurations are drawn from the log probability of the network.
-  """
-  # Pretraining is slow on larger systems (very low GPU utilization) because the
-  # Hartree-Fock orbitals are evaluated on CPU and only on a single host.
-  # Implementing the basis set in JAX would enable using GPUs and allow
-  # eval_orbitals to be pmapped.
-
+  """Performs training to match initialization as closely as possible to HF."""
   optimizer = optax.adam(3.e-4)
-  opt_state_pt = optimizer.init(params)
+  opt_state_pt = optimizer.init(params) if opt_state is None else opt_state
 
   pretrain_step = make_pretrain_step(
       batch_orbitals,
@@ -315,20 +281,25 @@ def pretrain_hartree_fock(
       scf_fraction=scf_fraction,
       states=states,
   )
-  pretrain_step = pretrain_step
-  """we need rewrite the following part.11.11.2025."""
-  #batch_spins = jnp.tile(spins[None], [positions.shape[1], 1])
-  #pmap_spins = kfac_jax.utils.replicate_all_local_devices(batch_spins)
-  data = networks.KANetsData(
-      positions=positions, spins=spins, atoms=atoms, charges=charges
-  )
 
-  for t in range(iterations):
+  if data is None:
+    data = networks.KANetsData(
+        positions=positions, spins=spins, atoms=atoms, charges=charges
+    )
+
+  iterator = trange(start_iteration, iterations, desc='Pretrain', dynamic_ncols=True)
+
+  for t in iterator:
     sharded_key, subkeys = jax.random.split(sharded_key)
     data, params, opt_state_pt, loss, = pretrain_step(
         data, params, opt_state_pt, subkeys, scf_approx)
-    jax.debug.print("loss:{}", loss)
-    #logging.info('Pretrain iter %05d: %g %g', t, loss[0],)
+    step = t + 1
+    loss_value = float(jnp.real(loss))
+    iterator.set_postfix(iter=step, loss=f'{loss_value:.6f}')
+
     if logger:
-      logger(t, loss[0])
-  return params, data.positions
+      logger(step, loss_value)
+    if checkpoint_callback:
+      checkpoint_callback(step, loss_value, params, opt_state_pt, data, sharded_key)
+
+  return params, data, opt_state_pt, sharded_key

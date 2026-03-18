@@ -1,21 +1,20 @@
 import ml_collections
-from ml_collections import config_dict
+from tools.utils import system
+
 
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 128,
+        'batch_size': 10,
         'pos': [[0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.4, 0.4, 0.4, 0.5, 0.5, 0.5, 0.6, 0.6, 0.6],
                 [0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.4, 0.4, 0.4, 0.5, 0.5, 0.5, 0.6, 0.6, 0.6]],
-        'charges': [6.],
-        'spins': [1, 1, 1, -1, -1, -1],
-        'atoms': [[0.0, 0.0, 0.0]],
-        'layer_dims': [4, 4, 4, 6],
-        'g': [3, 3, 3,],
-        'k': [3, 3, 3,],
-        'grid_range':[[-10, 10], [-10, 10], [-10, 10]],
-        'iterations': 1000,
-        'preiterations': 1000,
+        'layer_dims': [4, 20, 20, 20, 20],
+        'g': [10, 10, 10, 10],
+        'k': [3, 3, 3, 3],
+        'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
+        'iterations': 100,
+        'preiterations': 100,
+        'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
         'init_width': 0.1,
@@ -36,26 +35,31 @@ def default() -> ml_collections.ConfigDict:
         'laplacian_method': 'default',
         't_init': 0,
         'debug': False,
-        'learning_rate': 0.05,
+        'learning_rate': 0.005,
         'learning_rate_decay': 10000.0,
         'chebyshev': True,
         'spline': False,
         'envelope_chebyshev': False,
         'envelope_spline': False,
         'envelope_simple': True,
-        'add_residual' : False,
+        'add_residual': True,
         'add_bias': True,
         'external_weights': True,
-        'system':{
-            'molecule': config_dict.placeholder(list),
+        'system': {
+            'molecule': [system.Atom('C', (0, 0, 0))],
             'electrons': (3, 3),
-            'nelectrons': 6,
-
         },
-        'envelope':{
+        'envelope': {
             'g_envelope': 10,
-            'k_envelope': 3,
-            'grid_range_envelope': [-10, 10],
-        }
+            'k_envelope': 5,
+            'grid_range_envelope': [0, 2],
+        },
+        'output': {
+            'root_dir': 'outputs/default',
+            'checkpoint_every': 10,
+            'metrics_every': 1,
+            'resume': False,
+            'enable_tensorboard': True,
+        },
     })
     return cfg
