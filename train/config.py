@@ -19,7 +19,7 @@ def default() -> ml_collections.ConfigDict:
         'seed_electrons_coords': 22,
         'init_width': 0.1,
         'core_electrons': {},
-        'pretrain_method': 'dft',
+        'pretrain_method': 'hf', #'pretrain_method': 'dft',
         'pretrain_basis': 'ccpvdz',
         'pretrain_restricted': False,
         'hf_basis': 'ccpvdz',

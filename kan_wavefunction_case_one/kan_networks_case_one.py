@@ -24,10 +24,10 @@ Param = MutableMapping[str, jnp.ndarray]
 
 @chex.dataclass
 class KANetsData:
-    positions: Any
-    spins: Any
-    atoms: Any
-    charges: Any
+    positions: jnp.ndarray
+    spins: jnp.ndarray
+    atoms: jnp.ndarray
+    charges: jnp.ndarray
 
 
 def construct_input_features(
@@ -104,6 +104,12 @@ def make_kan_net_layers(layer_dims: jnp.ndarray,
     :param chebyshev: turn on chebyshev basis functions or not.
     :return: one vector from equivalent layers.
     """
+    # Materialize architecture hyperparameters as Python integers once.
+    # This avoids `int(tracer)` concretization errors inside JAX-transformed
+    # code paths such as the MCMC loop.
+    layer_dims = tuple(int(x) for x in layer_dims)
+    g = tuple(int(x) for x in g)
+    k = tuple(int(x) for x in k)
     def init(key: chex.PRNGKey):
         """here, we initialize the parameters of KANets wave function. 9.10.2025."""
         params = {}

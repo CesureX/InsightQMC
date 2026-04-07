@@ -112,10 +112,12 @@ def make_mcmc_step(batch_network,
         logprob = 2.0 * batch_network(params, pos, data.spins, data.atoms, data.charges)
         #jax.debug.print("logprob:{}", logprob)
         """it is kind of stupid. i hate loop. However, currently it is working."""
+        num_accepts = 0.0
         for i in range(steps):
-            data, key, logprob, num_accepts = mh_update(params, batch_network, data, key, logprob, 0.0, )
+            data, key, logprob, num_accepts = mh_update(params, batch_network, data, key, logprob, num_accepts)
+        pmove = num_accepts / (steps * pos.shape[0])
         #jax.debug.print("new_data:{}", data)
-        return data
+        return data, pmove
 
     return mcmc_step
 

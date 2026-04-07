@@ -239,7 +239,8 @@ def make_pretrain_step(
     updates, state = optimizer_update(search_direction, state, params)
     params = optax.apply_updates(params, updates)
     full_params = {'ferminet': params, 'scf': scf_approx}
-    data = mcmc_step(full_params, data, key, width=0.02)
+    mcmc_out = mcmc_step(full_params, data, key, width=0.02)
+    data = mcmc_out[0] if isinstance(mcmc_out, tuple) else mcmc_out
     return data, params, state, loss_val,
 
   return pretrain_step

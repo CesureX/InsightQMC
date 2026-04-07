@@ -360,7 +360,7 @@ def train(cfg: ml_collections.ConfigDict):
 
         for t in iterator:
             sharded_key, subkeys = jax.random.split(sharded_key, 2)
-            data, params, train_opt_state, loss, aux_data = step(
+            data, params, train_opt_state, loss, aux_data, pmove = step(
                 data,
                 params,
                 train_opt_state,
@@ -379,6 +379,7 @@ def train(cfg: ml_collections.ConfigDict):
                     {
                         'loss': loss_value,
                         'variance': variance_value,
+                        'pmove': float(pmove),
                     },
                 )
 
