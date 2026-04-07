@@ -10,7 +10,7 @@ from monte_carlo_step.mcmc import make_mcmc_step
 from hamiltonian import hamiltonian
 from loss_function import loss as qmc_loss_functions
 from initialization import electrons_initialization
-from pretrain import pretrain_HF
+from pretrain import pretrain_DFT, pretrain_HF
 from train.training_io import RunManager
 from tqdm.auto import trange
 
@@ -40,10 +40,17 @@ def train(cfg: ml_collections.ConfigDict):
     init_width = float(cfg.init_width)
     core_electrons = cfg.core_electrons
 
-    hf_basis = cfg.hf_basis
-    hf_restricted = bool(cfg.hf_restricted)
-    hf_states = int(cfg.hf_states)
-    hf_excitation_type = cfg.hf_excitation_type
+    pretrain_method = str(cfg.get('pretrain_method', 'hf')).lower()
+    pretrain_basis = cfg.get('pretrain_basis', cfg.get('hf_basis', 'ccpvdz'))
+    pretrain_restricted = bool(
+        cfg.get('pretrain_restricted', cfg.get('hf_restricted', False))
+    )
+    hf_basis = cfg.get('hf_basis', pretrain_basis)
+    hf_restricted = bool(cfg.get('hf_restricted', pretrain_restricted))
+    hf_states = int(cfg.get('hf_states', 0))
+    hf_excitation_type = cfg.get('hf_excitation_type', 'ordered')
+    dft_xc = cfg.get('dft_xc', 'pbe,pbe')
+    dft_grid_level = cfg.get('dft_grid_level', 3)
     pyscf_mol = cfg.system.get('pyscf_mol')
 
     mcmc_batch_per_device = int(cfg.mcmc_batch_per_device)
@@ -186,21 +193,6 @@ def train(cfg: ml_collections.ConfigDict):
 
         needs_pretrain = run_pretrain and train_opt_state is None and pretrain_start_step < preiterations
         if needs_pretrain:
-            # Prepare the Hartree-Fock reference used for orbital pretraining.
-            hartree_fock = pretrain_HF.get_hf(
-                pyscf_mol=pyscf_mol,
-                molecule=molecule,
-                nspins=electrons,
-                restricted=hf_restricted,
-                basis=hf_basis,
-                ecp={},
-                core_electrons=core_electrons,
-                states=hf_states,
-                excitation_type=hf_excitation_type,
-            )
-            if debug:
-                jax.debug.print("hartree_fock:{}", hartree_fock)
-
             def log_pretrain(step: int, loss_value: float) -> None:
                 if run_manager.should_log(step, preiterations):
                     run_manager.log_scalars('pretrain', step, {'loss': loss_value})
@@ -218,27 +210,88 @@ def train(cfg: ml_collections.ConfigDict):
                 if run_manager.should_checkpoint(step, preiterations):
                     run_manager.checkpoints.save_step('pretrain', step, checkpoint_state)
 
-            params, data, pretrain_opt_state, sharded_key = pretrain_HF.pretrain_hartree_fock(
-                params=params,
-                positions=data.positions,
-                spins=data.spins,
-                charges=data.charges,
-                atoms=data.atoms,
-                batch_network=batch_network,
-                batch_orbitals=orbitals_vmap,
-                sharded_key=sharded_key,
-                electrons=electrons,
-                scf_approx=hartree_fock,
-                iterations=preiterations,
-                batch_size=batch_size,
-                logger=log_pretrain,
-                checkpoint_callback=checkpoint_pretrain,
-                scf_fraction=scf_fraction,
-                states=hf_states,
-                start_iteration=pretrain_start_step,
-                opt_state=pretrain_opt_state,
-                data=data,
-            )
+            if pretrain_method == 'hf':
+                # Prepare the Hartree-Fock reference used for orbital pretraining.
+                hartree_fock = pretrain_HF.get_hf(
+                    pyscf_mol=pyscf_mol,
+                    molecule=molecule,
+                    nspins=electrons,
+                    restricted=pretrain_restricted,
+                    basis=pretrain_basis,
+                    ecp={},
+                    core_electrons=core_electrons,
+                    states=hf_states,
+                    excitation_type=hf_excitation_type,
+                )
+                if debug:
+                    jax.debug.print("hartree_fock:{}", hartree_fock)
+
+                params, data, pretrain_opt_state, sharded_key = pretrain_HF.pretrain_hartree_fock(
+                    params=params,
+                    positions=data.positions,
+                    spins=data.spins,
+                    charges=data.charges,
+                    atoms=data.atoms,
+                    batch_network=batch_network,
+                    batch_orbitals=orbitals_vmap,
+                    sharded_key=sharded_key,
+                    electrons=electrons,
+                    scf_approx=hartree_fock,
+                    iterations=preiterations,
+                    batch_size=batch_size,
+                    logger=log_pretrain,
+                    checkpoint_callback=checkpoint_pretrain,
+                    scf_fraction=scf_fraction,
+                    states=hf_states,
+                    start_iteration=pretrain_start_step,
+                    opt_state=pretrain_opt_state,
+                    data=data,
+                )
+            elif pretrain_method == 'dft':
+                if hf_states != 0:
+                    raise ValueError(
+                        'DFT pretraining currently supports only ground states; set hf_states=0.'
+                    )
+                dft_reference = pretrain_DFT.get_dft(
+                    pyscf_mol=pyscf_mol,
+                    molecule=molecule,
+                    nspins=electrons,
+                    restricted=pretrain_restricted,
+                    basis=pretrain_basis,
+                    ecp={},
+                    core_electrons=core_electrons,
+                    xc=dft_xc,
+                    grid_level=dft_grid_level,
+                    states=0,
+                )
+                if debug:
+                    jax.debug.print("dft_reference:{}", dft_reference)
+
+                params, data, pretrain_opt_state, sharded_key = pretrain_DFT.pretrain_ks_dft(
+                    params=params,
+                    positions=data.positions,
+                    spins=data.spins,
+                    charges=data.charges,
+                    atoms=data.atoms,
+                    batch_network=batch_network,
+                    batch_orbitals=orbitals_vmap,
+                    sharded_key=sharded_key,
+                    electrons=electrons,
+                    dft_approx=dft_reference,
+                    iterations=preiterations,
+                    batch_size=batch_size,
+                    logger=log_pretrain,
+                    checkpoint_callback=checkpoint_pretrain,
+                    scf_fraction=scf_fraction,
+                    start_iteration=pretrain_start_step,
+                    opt_state=pretrain_opt_state,
+                    data=data,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported pretrain_method: {pretrain_method}. Expected 'hf' or 'dft'."
+                )
+
             train_start_step = t_init
 
         # Build the local-energy estimator and the variational loss.

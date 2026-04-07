@@ -154,10 +154,6 @@ def forward_each_layer(x: jnp.ndarray,
     return value
 
 
-
-
-
-
 '''
   key1, key2 = jax.random.split(key)
   weight = (
