@@ -24,10 +24,10 @@ Param = MutableMapping[str, jnp.ndarray]
 
 @chex.dataclass
 class KANetsData:
-    positions: jnp.ndarray
-    spins: jnp.ndarray
-    atoms: jnp.ndarray
-    charges: jnp.ndarray
+    positions: Any
+    spins: Any
+    atoms: Any
+    charges: Any
 
 
 def construct_input_features(
@@ -110,6 +110,7 @@ def make_kan_net_layers(layer_dims: jnp.ndarray,
     layer_dims = tuple(int(x) for x in layer_dims)
     g = tuple(int(x) for x in g)
     k = tuple(int(x) for x in k)
+    
     def init(key: chex.PRNGKey):
         """here, we initialize the parameters of KANets wave function. 9.10.2025."""
         params = {}

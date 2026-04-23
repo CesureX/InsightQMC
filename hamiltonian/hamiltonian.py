@@ -6,10 +6,8 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 import numpy as np
-try:
-  import folx
-except ModuleNotFoundError:
-  folx = None
+import folx
+
 
 
 
