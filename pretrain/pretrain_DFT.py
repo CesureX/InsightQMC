@@ -4,7 +4,7 @@ from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from absl import logging
 import chex
-from kan_wavefunction_case_one import kan_networks_case_one as networks
+from train import qmc_components as networks
 import jax
 from jax import numpy as jnp
 import optax

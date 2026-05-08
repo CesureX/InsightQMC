@@ -8,10 +8,11 @@ import jax
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
+from flax import nnx
 
 from hamiltonian import hamiltonian
-from kan_wavefunction_case_one.kan_networks_case_one import make_kan_net
-from kan_wavefunction_case_one.spin_indices import jastrow_indices_ee
+from jkan.models import MultKAN
+from train import qmc_components
 from tools.utils import system
 
 
@@ -45,6 +46,29 @@ def _load_positions(path: Path | None, checkpoint_data) -> jnp.ndarray:
     return jnp.array(payload)
 
 
+def _first_int(values, default: int) -> int:
+    if values is None:
+        return default
+    arr = np.asarray(values).reshape(-1)
+    return int(arr[0]) if arr.size else default
+
+
+def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
+    if values is None:
+        return tuple(default)
+    arr = np.asarray(values)
+    if arr.ndim == 1 and arr.size >= 2:
+        return (float(arr[0]), float(arr[1]))
+    if arr.ndim >= 2 and arr.shape[-1] >= 2:
+        flat = arr.reshape(-1, arr.shape[-1])
+        return (float(flat[0, 0]), float(flat[0, 1]))
+    return tuple(default)
+
+
+def _array_partitions(sizes):
+    return list(np.cumsum(tuple(int(size) for size in sizes)))[:-1]
+
+
 def _build_network(cfg: ml_collections.ConfigDict):
     molecule = cfg.system.molecule
     electrons = tuple(cfg.system.electrons)
@@ -55,44 +79,132 @@ def _build_network(cfg: ml_collections.ConfigDict):
     atoms = jnp.array([atom.coords for atom in molecule])
     charges = jnp.array([atom.charge for atom in molecule])
     spins_list = [1] * electrons[0] + [-1] * electrons[1]
-    spins_jastrow = jnp.array(spins_list)
     spins = jnp.array([spins_list])
-    g = jnp.array(cfg.g)
-    k = jnp.array(cfg.k)
-    layer_dims = jnp.array(cfg.layer_dims)
-    grid_range_envelope = jnp.array(cfg.envelope.grid_range_envelope)
 
-    parallel_indices, antiparallel_indices, n_parallel, n_antiparallel = jastrow_indices_ee(
-        spins=spins_jastrow,
-        nelectrons=nelectrons,
+    mkan_cfg = cfg.get('mkan', {})
+    layer_type = str(mkan_cfg.get('layer_type', 'spline')).lower()
+    mkan_input_dim = int(nfeatures if mkan_cfg.get('input_dim', None) is None else mkan_cfg.input_dim)
+    output_default = (2 * nelectrons) if bool(cfg.complex_output) else nelectrons
+    mkan_output_dim = int(output_default if mkan_cfg.get('output_dim', None) is None else mkan_cfg.output_dim)
+
+    if mkan_cfg.get('width', None) is None:
+        hidden_dims = [int(v) for v in np.asarray(cfg.layer_dims).reshape(-1)[1:-1]]
+        width = [mkan_input_dim, *hidden_dims, mkan_output_dim]
+    else:
+        width = list(mkan_cfg.width)
+        width[0] = mkan_input_dim
+        width[-1] = mkan_output_dim
+
+    required_parameters = mkan_cfg.get('required_parameters', None)
+    if required_parameters is None:
+        if layer_type in ('chebyshev', 'legendre'):
+            required_parameters = {
+                'D': _first_int(cfg.k, 3),
+                'flavor': 'exact' if layer_type == 'chebyshev' else None,
+                'external_weights': bool(cfg.external_weights),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type in ('base', 'spline'):
+            required_parameters = {
+                'k': _first_int(cfg.k, 3),
+                'G': _first_int(cfg.g, 5),
+                'grid_range': _first_grid_range(cfg.grid_range),
+                'external_weights': bool(cfg.external_weights),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type == 'rbf':
+            required_parameters = {
+                'D': _first_int(cfg.k, 5),
+                'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
+                'external_weights': bool(cfg.external_weights),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type == 'sine':
+            required_parameters = {
+                'D': _first_int(cfg.k, 5),
+                'external_weights': bool(cfg.external_weights),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type == 'fourier':
+            required_parameters = {
+                'D': _first_int(cfg.k, 5),
+                'add_bias': bool(cfg.add_bias),
+            }
+        else:
+            raise ValueError(f'Unsupported inference MKAN layer_type: {layer_type}')
+    else:
+        required_parameters = dict(required_parameters)
+
+    model_template = MultKAN(
+        width=width,
+        layer_type=layer_type,
+        required_parameters=required_parameters,
+        mult_arity=mkan_cfg.get('mult_arity', 2),
+        seed=int(cfg.seed),
     )
-    _, signed_network, orbitals_apply = make_kan_net(
-        nspins=electrons,
-        charges=charges,
-        nelectrons=nelectrons,
-        nfeatures=nfeatures,
-        n_parallel=n_parallel,
-        n_antiparallel=n_antiparallel,
-        parallel_indices=parallel_indices,
-        antiparallel_indices=antiparallel_indices,
-        grid_range=cfg.grid_range,
-        g=g,
-        k=k,
-        natoms=natoms,
-        ndims=3,
-        layer_dims=layer_dims,
-        g_envelope=int(cfg.envelope.g_envelope),
-        k_envelope=int(cfg.envelope.k_envelope),
-        grid_range_envelope=grid_range_envelope,
-        chebyshev=bool(cfg.chebyshev),
-        spline=bool(cfg.spline),
-        add_residual=bool(cfg.add_residual),
-        add_bias=bool(cfg.add_bias),
-        external_weights=bool(cfg.external_weights),
-        envelope_chebyshev=bool(cfg.envelope_chebyshev),
-        envelope_spline=bool(cfg.envelope_spline),
-        envelope_simple=bool(cfg.envelope_simple),
-    )
+    graphdef, _, static_state = nnx.split(model_template, nnx.Param, ...)
+    same_spin_pairs, opposite_spin_pairs = qmc_components.spin_pair_indices(electrons)
+    active_spin_channels = qmc_components.active_spin_channels(electrons)
+
+    def apply_mkan(params, features):
+        model_params = params['mkan'] if isinstance(params, dict) and 'mkan' in params else params
+        model = nnx.merge(graphdef, model_params, static_state)
+        return model(features)
+
+    def orbitals_apply(params, pos, spins_, atoms_, charges_):
+        del spins_, charges_
+        ae, _, r_ae, _ = qmc_components.construct_input_features(pos, atoms_, ndim=3)
+        h_one = jnp.concatenate((r_ae, ae), axis=2).reshape(nelectrons, -1)
+        orbital_values = apply_mkan(params, h_one)
+        if bool(cfg.complex_output):
+            orbital_values = (
+                orbital_values[..., 0:2 * nelectrons:2]
+                + 1.0j * orbital_values[..., 1:2 * nelectrons:2]
+            )
+        else:
+            orbital_values = orbital_values[..., :nelectrons]
+
+        spin_partitions = _array_partitions(electrons)
+        orbital_channels = jnp.split(orbital_values, spin_partitions, axis=0)
+        orbital_channels = [
+            channel for channel, spin in zip(orbital_channels, electrons) if spin > 0
+        ]
+        if bool(cfg.envelope_simple):
+            r_ae_channels = jnp.split(r_ae, spin_partitions, axis=0)
+            r_ae_channels = [
+                channel for channel, spin in zip(r_ae_channels, electrons) if spin > 0
+            ]
+            orbital_channels = [
+                channel * qmc_components.apply_isotropic_envelope(
+                    r_ae=r_ae_channel,
+                    **envelope_param,
+                )
+                for channel, r_ae_channel, envelope_param in zip(
+                    orbital_channels, r_ae_channels, params['envelope']
+                )
+            ]
+
+        shapes = [(spin, -1, nelectrons) for spin in active_spin_channels]
+        orbital_channels = [
+            jnp.reshape(channel, shape)
+            for channel, shape in zip(orbital_channels, shapes)
+        ]
+        orbital_channels = [jnp.transpose(channel, (1, 0, 2)) for channel in orbital_channels]
+        return [jnp.concatenate(orbital_channels, axis=1)]
+
+    def signed_network(params, pos, spins_, atoms_, charges_):
+        determinant = orbitals_apply(params, pos, spins_, atoms_, charges_)
+        phase, logmag = qmc_components.logdet_matmul(determinant)
+        if bool(cfg.get('jastrow', {}).get('ee', True)):
+            _, _, _, r_ee = qmc_components.construct_input_features(pos, atoms_, ndim=3)
+            logmag = logmag + qmc_components.apply_pade_ee_jastrow(
+                r_ee,
+                params['jastrow_ee'],
+                same_spin_pairs,
+                opposite_spin_pairs,
+            ) / nelectrons
+        return phase, logmag
+
     return signed_network, orbitals_apply, atoms, charges, spins, electrons
 
 

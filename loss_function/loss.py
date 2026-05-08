@@ -3,7 +3,7 @@ from typing import Tuple
 import chex
 import constants
 from hamiltonian import hamiltonian
-from kan_wavefunction_case_one import kan_networks_case_one as networks
+from train import qmc_components as networks
 import jax
 import jax.numpy as jnp
 from typing_extensions import Protocol

@@ -3,6 +3,7 @@ from jax import numpy as jnp
 from flax import nnx
 
 from ..layers import get_layer
+from ..layers.utils import adam_transition
 
 from typing import List, Sequence, Union
 
@@ -125,6 +126,23 @@ class MultKAN(nnx.Module):
             x = self.subnode_scale[idx][...][None, :] * x + self.subnode_bias[idx][...][None, :]
             x = self._apply_multiplication(x, idx)
             x = self.node_scale[idx][...][None, :] * x + self.node_bias[idx][...][None, :]
+
+    def extend_grids(self, x, G_new, optimizer=None):
+        """
+        Extend/refine all spline grids and transfer edge functions to the new
+        bases with the same least-squares projection used by each layer.
+        """
+
+        self.update_grids(x, G_new)
+
+        if optimizer is not None:
+            _, model_state = nnx.split(self)
+            adam_transition(optimizer.opt_state, model_state)
+
+    def refine_grids(self, x, G_new, optimizer=None):
+        """Alias for :meth:`extend_grids` using KAN refinement terminology."""
+
+        self.extend_grids(x, G_new, optimizer=optimizer)
 
     def __call__(self, x):
         for idx, layer in enumerate(self.layers):
