@@ -5,8 +5,8 @@ from typing import Callable, Mapping, Sequence, Tuple, Union, Optional
 from absl import logging
 import chex
 #import constants
-from monte_carlo_step import VMCmcstep
-from train import qmc_components as networks
+import vmcmc
+import networks
 from tools.utils import scf
 from tools.utils import system
 import jax
@@ -169,7 +169,7 @@ def make_pretrain_step(
       phase = jnp.zeros_like(logmag)
       return phase, logmag
 
-  mcmc_step = VMCmcstep.make_mcmc_step(
+  mcmc_step = vmcmc.make_vmcmc_step(
       f=mcmc_signed_network,
       ndim=3,
       nelectrons=sum(electrons),
@@ -298,7 +298,7 @@ def pretrain_hartree_fock(
       optimizer.update,
       electrons=electrons,
       batch_size=batch_size,
-      full_det=True,
+      full_det=False,
       scf_fraction=scf_fraction,
       states=states,
       mcmc_steps=mcmc_steps,

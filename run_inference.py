@@ -10,9 +10,11 @@ import ml_collections
 import numpy as np
 from flax import nnx
 
-from hamiltonian import hamiltonian
+import hamiltonian
+import envelope
+import jastrow
+import networks
 from jkan.models import MultKAN
-from train import qmc_components
 from tools.utils import system
 
 
@@ -143,8 +145,16 @@ def _build_network(cfg: ml_collections.ConfigDict):
         seed=int(cfg.seed),
     )
     graphdef, _, static_state = nnx.split(model_template, nnx.Param, ...)
-    same_spin_pairs, opposite_spin_pairs = qmc_components.spin_pair_indices(electrons)
-    active_spin_channels = qmc_components.active_spin_channels(electrons)
+    jastrow_type = str(cfg.get('jastrow', {}).get('type', 'pade')).lower()
+    if jastrow_type == 'pade':
+        same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices(electrons)
+        apply_jastrow = jastrow.apply_pade_ee_jastrow
+    elif jastrow_type == 'ferminet':
+        same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(electrons)
+        apply_jastrow = jastrow.apply_ferminet_ee_jastrow
+    else:
+        raise ValueError(f'Unsupported jastrow.type={jastrow_type!r}.')
+    active_spin_channels = networks.active_spin_channels(electrons)
 
     def apply_mkan(params, features):
         model_params = params['mkan'] if isinstance(params, dict) and 'mkan' in params else params
@@ -153,7 +163,7 @@ def _build_network(cfg: ml_collections.ConfigDict):
 
     def orbitals_apply(params, pos, spins_, atoms_, charges_):
         del spins_, charges_
-        ae, _, r_ae, _ = qmc_components.construct_input_features(pos, atoms_, ndim=3)
+        ae, _, r_ae, _ = networks.construct_input_features(pos, atoms_, ndim=3)
         h_one = jnp.concatenate((r_ae, ae), axis=2).reshape(nelectrons, -1)
         orbital_values = apply_mkan(params, h_one)
         if bool(cfg.complex_output):
@@ -165,44 +175,54 @@ def _build_network(cfg: ml_collections.ConfigDict):
             orbital_values = orbital_values[..., :nelectrons]
 
         spin_partitions = _array_partitions(electrons)
-        orbital_channels = jnp.split(orbital_values, spin_partitions, axis=0)
+        orbital_row_channels = jnp.split(orbital_values, spin_partitions, axis=0)
         orbital_channels = [
-            channel for channel, spin in zip(orbital_channels, electrons) if spin > 0
+            channel[:, start : start + spin]
+            for channel, spin, start in zip(
+                orbital_row_channels,
+                electrons,
+                (0, int(electrons[0])),
+            )
+            if spin > 0
         ]
         if bool(cfg.envelope_simple):
             r_ae_channels = jnp.split(r_ae, spin_partitions, axis=0)
             r_ae_channels = [
                 channel for channel, spin in zip(r_ae_channels, electrons) if spin > 0
             ]
+            envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
+            if envelope_type == 'isotropic':
+                apply_envelope = envelope.apply_isotropic_envelope
+            elif envelope_type == 'chebyshev':
+                apply_envelope = envelope.apply_chebyshev_envelope
+            else:
+                raise ValueError(f'Unsupported envelope_type={envelope_type!r}.')
             orbital_channels = [
-                channel * qmc_components.apply_isotropic_envelope(
-                    r_ae=r_ae_channel,
-                    **envelope_param,
-                )
+                channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
                 for channel, r_ae_channel, envelope_param in zip(
                     orbital_channels, r_ae_channels, params['envelope']
                 )
             ]
 
-        shapes = [(spin, -1, nelectrons) for spin in active_spin_channels]
+        shapes = [(spin, -1, spin) for spin in active_spin_channels]
         orbital_channels = [
             jnp.reshape(channel, shape)
             for channel, shape in zip(orbital_channels, shapes)
         ]
         orbital_channels = [jnp.transpose(channel, (1, 0, 2)) for channel in orbital_channels]
-        return [jnp.concatenate(orbital_channels, axis=1)]
+        return orbital_channels
 
     def signed_network(params, pos, spins_, atoms_, charges_):
         determinant = orbitals_apply(params, pos, spins_, atoms_, charges_)
-        phase, logmag = qmc_components.logdet_matmul(determinant)
+        phase, logmag = networks.logdet_matmul(determinant)
         if bool(cfg.get('jastrow', {}).get('ee', True)):
-            _, _, _, r_ee = qmc_components.construct_input_features(pos, atoms_, ndim=3)
-            logmag = logmag + qmc_components.apply_pade_ee_jastrow(
+            _, _, _, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
+            logmag = logmag + apply_jastrow(
                 r_ee,
                 params['jastrow_ee'],
                 same_spin_pairs,
                 opposite_spin_pairs,
-            ) / nelectrons
+            )
         return phase, logmag
 
     return signed_network, orbitals_apply, atoms, charges, spins, electrons

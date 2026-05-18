@@ -1,6 +1,6 @@
 from typing import Any, Callable, Optional, Sequence, Tuple, Union, Protocol, cast
 import chex
-from train import qmc_components as networks
+import networks
 from tools.utils import utils
 import jax
 from jax import lax

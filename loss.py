@@ -2,8 +2,8 @@ import functools
 from typing import Tuple
 import chex
 import constants
-from hamiltonian import hamiltonian
-from train import qmc_components as networks
+import hamiltonian
+import networks
 import jax
 import jax.numpy as jnp
 from typing_extensions import Protocol

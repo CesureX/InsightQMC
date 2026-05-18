@@ -10,14 +10,16 @@ import numpy as np
 import optax
 from tqdm.auto import trange
 
-from hamiltonian import hamiltonian
-from initialization import electrons_initialization
+import hamiltonian
+import electrons_initialization
+import envelope
+import jastrow
+import networks
 from jkan.models import MultKAN
-from loss_function import loss as qmc_loss_functions
-from monte_carlo_step import VMCmcstep
-from optimizer.opt import make_opt_update_step, make_training_step
+import loss as qmc_loss_functions
+import vmcmc
+from opt import make_opt_update_step, make_training_step
 from train.pretrain_runner import PretrainRunner
-from train import qmc_components
 from train.training_io import RunManager
 
 
@@ -50,12 +52,12 @@ def _array_partitions(sizes):
 
 
 def _construct_input_features(pos: jnp.ndarray, atoms: jnp.ndarray, ndim: int = 3):
-    return qmc_components.construct_input_features(pos, atoms, ndim=ndim)
+    return networks.construct_input_features(pos, atoms, ndim=ndim)
 
 
 @flax.struct.dataclass
 class RuntimeState:
-    data: qmc_components.KANetsData
+    data: networks.KANetsData
     key: Any
     mcmc_width: jnp.ndarray
     pmoves: np.ndarray
@@ -152,8 +154,11 @@ class VMCTrainer:
         self.add_bias = bool(cfg.add_bias)
         self.external_weights = bool(cfg.external_weights)
         self.envelope_simple = bool(cfg.envelope_simple)
+        self.envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
+        self.envelope_degree = int(cfg.get('envelope_degree', 5))
         jastrow_cfg = cfg.get('jastrow', {})
         self.jastrow_ee = bool(jastrow_cfg.get('ee', True))
+        self.jastrow_type = str(jastrow_cfg.get('type', 'pade')).lower()
 
         mkan_cfg = cfg.get('mkan', {})
         self.mkan_layer_type = str(mkan_cfg.get('layer_type', 'spline')).lower()
@@ -204,7 +209,7 @@ class VMCTrainer:
         stage: str,
         step: int,
         params,
-        data: qmc_components.KANetsData,
+        data: networks.KANetsData,
         key,
         pretrain_opt_state=None,
         train_opt_state=None,
@@ -225,15 +230,33 @@ class VMCTrainer:
         self._mkan_graphdef, initial_params, self._mkan_static_state = nnx.split(
             model_template, nnx.Param, ...
         )
-        active_spin_channels = qmc_components.active_spin_channels(self.electrons)
-        envelope_output_dims = [self.nelectrons for _ in active_spin_channels]
-        envelope_params = (
-            qmc_components.init_isotropic_envelope(self.natoms, envelope_output_dims)
-            if self.envelope_simple
-            else None
-        )
-        same_spin_pairs, opposite_spin_pairs = qmc_components.spin_pair_indices(self.electrons)
-        jastrow_params = qmc_components.init_pade_ee_jastrow() if self.jastrow_ee else None
+        active_spin_channels = networks.active_spin_channels(self.electrons)
+        envelope_output_dims = active_spin_channels
+        envelope_params = None
+        if self.envelope_simple:
+            if self.envelope_type == 'isotropic':
+                envelope_params = envelope.init_isotropic_envelope(
+                    self.natoms, envelope_output_dims
+                )
+            elif self.envelope_type == 'chebyshev':
+                envelope_params = envelope.init_chebyshev_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                )
+            else:
+                raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
+        if self.jastrow_type == 'pade':
+            same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices(self.electrons)
+            init_jastrow = jastrow.init_pade_ee_jastrow
+            apply_jastrow = jastrow.apply_pade_ee_jastrow
+        elif self.jastrow_type == 'ferminet':
+            same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(self.electrons)
+            init_jastrow = jastrow.init_ferminet_ee_jastrow
+            apply_jastrow = jastrow.apply_ferminet_ee_jastrow
+        else:
+            raise ValueError(f'Unsupported jastrow.type={self.jastrow_type!r}.')
+        jastrow_params = init_jastrow() if self.jastrow_ee else None
 
         def kan_init(key):
             del key
@@ -269,10 +292,16 @@ class VMCTrainer:
                 orbital_values = orbital_values[..., :self.nelectrons]
 
             spin_partitions = _array_partitions(self.electrons)
-            orbital_channels = jnp.split(orbital_values, spin_partitions, axis=0)
+            orbital_row_channels = jnp.split(orbital_values, spin_partitions, axis=0)
             active_spin_channels = [spin for spin in self.electrons if spin > 0]
             orbital_channels = [
-                channel for channel, spin in zip(orbital_channels, self.electrons) if spin > 0
+                channel[:, start : start + spin]
+                for channel, spin, start in zip(
+                    orbital_row_channels,
+                    self.electrons,
+                    (0, int(self.electrons[0])),
+                )
+                if spin > 0
             ]
             if self.envelope_simple:
                 if not (isinstance(params, dict) and 'envelope' in params):
@@ -281,16 +310,18 @@ class VMCTrainer:
                 r_ae_channels = [
                     channel for channel, spin in zip(r_ae_channels, self.electrons) if spin > 0
                 ]
+                apply_envelope = (
+                    envelope.apply_chebyshev_envelope
+                    if self.envelope_type == 'chebyshev'
+                    else envelope.apply_isotropic_envelope
+                )
                 orbital_channels = [
-                    channel * qmc_components.apply_isotropic_envelope(
-                        r_ae=r_ae_channel,
-                        **envelope_param,
-                    )
+                    channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
                     for channel, r_ae_channel, envelope_param in zip(
                         orbital_channels, r_ae_channels, params['envelope']
                     )
                 ]
-            shapes = [(spin, -1, self.nelectrons) for spin in active_spin_channels]
+            shapes = [(spin, -1, spin) for spin in active_spin_channels]
             orbital_channels = [
                 jnp.reshape(channel, shape)
                 for channel, shape in zip(orbital_channels, shapes)
@@ -299,21 +330,21 @@ class VMCTrainer:
                 jnp.transpose(channel, (1, 0, 2))
                 for channel in orbital_channels
             ]
-            return [jnp.concatenate(orbital_channels, axis=1)]
+            return orbital_channels
 
         def signed_network(params, pos, spins, atoms, charges):
             determinant = orbitals_apply(params, pos, spins, atoms, charges)
-            phase, logmag = qmc_components.logdet_matmul(determinant)
+            phase, logmag = networks.logdet_matmul(determinant)
             if self.jastrow_ee:
                 if not (isinstance(params, dict) and 'jastrow_ee' in params):
                     raise ValueError('Missing Jastrow parameters for electron-electron Jastrow.')
                 _, _, _, r_ee = _construct_input_features(pos, atoms, ndim=3)
-                logmag = logmag + qmc_components.apply_pade_ee_jastrow(
+                logmag = logmag + apply_jastrow(
                     r_ee,
                     params['jastrow_ee'],
                     same_spin_pairs,
                     opposite_spin_pairs,
-                ) / self.nelectrons
+                )
             return phase, logmag
 
         def logabs_network(params, pos, spins, atoms, charges):
@@ -353,7 +384,7 @@ class VMCTrainer:
             extend_mkan_grid,
         )
 
-    def _grid_extension_samples(self, data: qmc_components.KANetsData) -> jnp.ndarray:
+    def _grid_extension_samples(self, data: networks.KANetsData) -> jnp.ndarray:
         positions = jnp.reshape(data.positions, (-1, self.nelectrons * 3))
 
         def single_position_features(pos):
@@ -462,7 +493,7 @@ class VMCTrainer:
                 init_width=self.init_width,
                 core_electrons=self.core_electrons,
             )
-            data = qmc_components.KANetsData(positions=pos, spins=self.spins, atoms=self.atoms, charges=self.charges)
+            data = networks.KANetsData(positions=pos, spins=self.spins, atoms=self.atoms, charges=self.charges)
 
         return params, data, sharded_key, pretrain_start_step, train_start_step, pretrain_opt_state, train_opt_state
 
@@ -499,7 +530,7 @@ class VMCTrainer:
         batch_signed_network = jax.vmap(
             signed_network, in_axes=(None, 0, None, None, None), out_axes=(0, 0)
         )
-        monte_carlo = VMCmcstep.make_mcmc_step(
+        monte_carlo = vmcmc.make_vmcmc_step(
             f=batch_signed_network,
             ndim=3,
             nelectrons=self.nelectrons,

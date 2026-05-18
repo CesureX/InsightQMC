@@ -4,7 +4,7 @@ from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from absl import logging
 import chex
-from train import qmc_components as networks
+import networks
 import jax
 from jax import numpy as jnp
 import optax
@@ -151,7 +151,7 @@ def pretrain_ks_dft(
       optimizer.update,
       electrons=electrons,
       batch_size=batch_size,
-      full_det=True,
+      full_det=False,
       scf_fraction=scf_fraction,
       states=0,
       mcmc_steps=mcmc_steps,
