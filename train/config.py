@@ -69,8 +69,8 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': None,
         },
         'system': {
-            'molecule': [system.Atom('H', (0, 0, 0))],
-            'electrons': (1, 0),
+            'molecule': [system.Atom('C', (0, 0, 0))],
+            'electrons': (3, 3),
         },
         'jastrow': {
             'ee': True,

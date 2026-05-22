@@ -594,6 +594,49 @@ class BaseLayer(nnx.Module):
         
         return y
 
+    def edge_activations(self, x):
+        """
+        Return the layer output together with per-edge activation values.
+
+        The ``postacts`` array has shape ``(batch, n_out, n_in)`` and contains
+        each input-to-output edge contribution before summing over inputs. The
+        returned ``y`` matches ``self(x)`` including the optional layer bias.
+        """
+
+        batch = x.shape[0]
+
+        Bi = self.basis(x)  # (n_in*n_out, G+k, batch)
+        ci = self.c_basis[...]  # (n_in*n_out, G+k)
+        spl = jnp.einsum('ij,ijk->ik', ci, Bi)  # (n_in*n_out, batch)
+        spl = jnp.transpose(spl, (1, 0))  # (batch, n_in*n_out)
+
+        if self.c_spl is not None:
+            cnst_spl = jnp.expand_dims(self.c_spl[...], axis=0).reshape(
+                (1, self.n_in * self.n_out)
+            )
+            edge_flat = cnst_spl * spl
+        else:
+            edge_flat = spl
+
+        if self.residual is not None:
+            x_ext = jnp.einsum('ij,k->ikj', x, jnp.ones(self.n_out,)).reshape(
+                (batch, self.n_in * self.n_out)
+            )
+            x_ext = jnp.transpose(x_ext, (1, 0))
+            res = jnp.transpose(self.residual(x_ext), (1, 0))
+            cnst_res = jnp.expand_dims(self.c_res[...], axis=0).reshape(
+                (1, self.n_in * self.n_out)
+            )
+            edge_flat += cnst_res * res
+
+        postacts = jnp.reshape(edge_flat, (batch, self.n_out, self.n_in))
+        y = jnp.sum(postacts, axis=2)
+
+        if self.bias is not None:
+            y += self.bias[...]
+
+        return y, {"preacts": x, "postacts": postacts}
+
 
 class SplineLayer(nnx.Module):
     """
@@ -1151,4 +1194,35 @@ class SplineLayer(nnx.Module):
             y += self.bias[...]  # (batch, n_out)
         
         return y
+
+    def edge_activations(self, x):
+        """
+        Return the layer output together with per-edge activation values.
+
+        The ``postacts`` array has shape ``(batch, n_out, n_in)`` and contains
+        each input-to-output edge contribution before summing over inputs. The
+        returned ``y`` matches ``self(x)`` including the optional layer bias.
+        """
+
+        batch = x.shape[0]
+
+        Bi = self.basis(x)  # (batch, n_in, G+k)
+
+        if self.c_spl is not None:
+            spl_w = self.c_basis[...] * self.c_spl[..., None]
+        else:
+            spl_w = self.c_basis[...]
+
+        postacts = jnp.einsum('bik,oik->boi', Bi, spl_w)
+
+        if self.residual is not None:
+            res = self.residual(x)
+            postacts += res[:, None, :] * self.c_res[...][None, :, :]
+
+        y = jnp.sum(postacts, axis=2)
+
+        if self.bias is not None:
+            y += self.bias[...]
+
+        return y, {"preacts": x, "postacts": postacts}
         
