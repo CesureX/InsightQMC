@@ -5,12 +5,12 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 512,
+        'batch_size': 4096,
         'layer_dims': [4, 16, 16],
         'g': [10, 10, 10, 10],
         'k': [3, 3, 3, 3],
         'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'iterations': 300000,
+        'iterations': 10000,
         'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
