@@ -1,11 +1,13 @@
+import math
+from typing import Callable, List, Sequence, Union
+
+import numpy as np
 from jax import numpy as jnp
 
 from flax import nnx
 
 from ..layers import get_layer
 from ..layers.utils import adam_transition
-
-from typing import List, Sequence, Union
 
 
 class MultKAN(nnx.Module):
@@ -29,7 +31,11 @@ class MultKAN(nnx.Module):
     ):
         del affine_trainable
 
-        LayerClass = get_layer(layer_type.lower())
+        object.__setattr__(self, "layer_type", layer_type.lower())
+        object.__setattr__(self, "required_parameters", dict(required_parameters or {}))
+        object.__setattr__(self, "seed", int(seed))
+
+        LayerClass = get_layer(self.layer_type)
 
         if required_parameters is None:
             raise ValueError(
@@ -74,6 +80,7 @@ class MultKAN(nnx.Module):
         )
         object.__setattr__(self, "_act_cache", None)
         object.__setattr__(self, "_attribute_cache", None)
+        object.__setattr__(self, "_symbolic_fits", None)
 
     def _arity_list_for_width(self, width_idx: int) -> List[int]:
         dim_mult = self.width[width_idx][1]
@@ -91,6 +98,49 @@ class MultKAN(nnx.Module):
                 f"Expected {dim_mult} multiplication arities at width index {width_idx}, got {len(arities)}."
             )
         return arities
+
+    def _prepare_input(self, x):
+        input_id = getattr(self, "input_id", None)
+        if input_id is None:
+            return x
+        input_id = np.asarray(input_id, dtype=np.int32)
+        if x.shape[1] == input_id.shape[0]:
+            return x
+        if input_id.size == 0:
+            return x[:, :0]
+        if int(np.max(input_id)) >= x.shape[1]:
+            raise ValueError(
+                f"Input has {x.shape[1]} columns, but this pruned MKAN expects "
+                f"columns up to index {int(np.max(input_id))}."
+            )
+        return x[:, input_id]
+
+    def _node_to_subnode_ids(self, width_idx: int, node_id: int) -> List[int]:
+        n_sum = self.width[width_idx][0]
+        if node_id < n_sum:
+            return [node_id]
+        arities = self._arity_list_for_width(width_idx)
+        mult_idx = node_id - n_sum
+        offset = n_sum + sum(arities[:mult_idx])
+        return list(range(offset, offset + arities[mult_idx]))
+
+    def _nodes_to_subnode_ids(self, width_idx: int, node_ids: Sequence[int]) -> List[int]:
+        subnode_ids: List[int] = []
+        for node_id in node_ids:
+            subnode_ids.extend(self._node_to_subnode_ids(width_idx, int(node_id)))
+        return subnode_ids
+
+    def _current_layer_parameters(self) -> dict:
+        first_layer = self.layers[0]
+        params = dict(self.required_parameters)
+        params["k"] = int(first_layer.k)
+        params["G"] = int(first_layer.grid.G)
+        params["grid_range"] = tuple(first_layer.grid.grid_range)
+        params["grid_e"] = float(first_layer.grid.grid_e)
+        params["residual"] = first_layer.residual
+        params["external_weights"] = first_layer.c_spl is not None
+        params["add_bias"] = first_layer.bias is not None
+        return params
 
     @property
     def width_in(self) -> List[int]:
@@ -136,6 +186,7 @@ class MultKAN(nnx.Module):
         return jnp.concatenate(pieces, axis=1)
 
     def update_grids(self, x, G_new):
+        x = self._prepare_input(x)
         for idx, layer in enumerate(self.layers):
             layer.update_grid(x, G_new)
             x = layer(x)
@@ -169,7 +220,11 @@ class MultKAN(nnx.Module):
         needed for plotting and attribution.
         """
 
+        raw_x = x
+        x = self._prepare_input(x)
+
         cache = {
+            "raw_input": raw_x,
             "acts": [x],
             "preacts": [],
             "postacts": [],
@@ -293,6 +348,750 @@ class MultKAN(nnx.Module):
             self.attribute(self._act_cache)
         return self._attribute_cache["feature_score"]
 
+    def feature_interaction(self, l, neuron_th=1e-2, feature_th=1e-2, cache=None):
+        """
+        Count active input-feature groups used by neurons in layer ``l``.
+
+        This mirrors pykan's ``feature_interaction`` helper: for each active
+        neuron, features whose score exceeds ``feature_th`` times that
+        neuron's maximum input score are grouped together.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to feature_interaction().")
+
+        interactions = {}
+        for neuron_idx in range(self.width_in[int(l)]):
+            score = np.asarray(self.attribute(cache, l=l, i=neuron_idx, plot=False))
+            if score.size == 0 or np.max(score) <= neuron_th:
+                continue
+            features = tuple(np.where(score > np.max(score) * feature_th)[0].tolist())
+            interactions[features] = interactions.get(features, 0) + 1
+        return interactions
+
+    def get_fun(self, l, i, j, cache=None, plot=True):
+        """
+        Return sorted ``(x, y)`` samples for edge ``(l, i, j)``.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to get_fun().")
+
+        inputs = np.asarray(cache["acts"][int(l)][:, int(i)])
+        outputs = np.asarray(cache["postacts"][int(l)][:, int(j), int(i)])
+        order = np.argsort(inputs)
+        inputs = inputs[order]
+        outputs = outputs[order]
+
+        if plot:
+            import matplotlib.pyplot as plt
+
+            plt.figure(figsize=(3, 3))
+            plt.plot(inputs, outputs, marker="o")
+
+        return inputs, outputs
+
+    def get_range(self, l, i, j, cache=None, verbose=True):
+        """
+        Return the input/output min and max for edge ``(l, i, j)``.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to get_range().")
+
+        x = np.asarray(cache["preacts"][int(l)][:, int(i)])
+        y = np.asarray(cache["postacts"][int(l)][:, int(j), int(i)])
+        x_min, x_max = float(np.min(x)), float(np.max(x))
+        y_min, y_max = float(np.min(y)), float(np.max(y))
+        if verbose:
+            print(f"x range: [{x_min:.2f}, {x_max:.2f}]")
+            print(f"y range: [{y_min:.2f}, {y_max:.2f}]")
+        return x_min, x_max, y_min, y_max
+
+    def _set_edge_zero(self, layer_idx: int, in_idx: int, out_idx: int):
+        layer = self.layers[int(layer_idx)]
+        in_idx = int(in_idx)
+        out_idx = int(out_idx)
+
+        if self.layer_type == "base":
+            flat_idx = out_idx * layer.n_in + in_idx
+            layer.c_basis = nnx.Param(layer.c_basis[...].at[flat_idx, :].set(0.0))
+        else:
+            layer.c_basis = nnx.Param(layer.c_basis[...].at[out_idx, in_idx, :].set(0.0))
+
+        if layer.c_spl is not None:
+            layer.c_spl = nnx.Param(layer.c_spl[...].at[out_idx, in_idx].set(0.0))
+        if layer.residual is not None:
+            layer.c_res = nnx.Param(layer.c_res[...].at[out_idx, in_idx].set(0.0))
+
+    def remove_edge(self, l, i, j):
+        """Set edge ``(l, i, j)`` to zero in-place."""
+
+        self._set_edge_zero(l, i, j)
+        object.__setattr__(self, "_act_cache", None)
+        object.__setattr__(self, "_attribute_cache", None)
+        object.__setattr__(self, "_symbolic_fits", None)
+        return self
+
+    def prune_edge(self, threshold=3e-2, cache=None):
+        """
+        Zero edges whose backward attribution score is below ``threshold``.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to prune_edge().")
+
+        attr = self.attribute(cache)
+        for layer_idx, scores in enumerate(attr["edge_scores"]):
+            scores_np = np.asarray(scores)
+            for out_idx in range(scores_np.shape[0]):
+                for in_idx in range(scores_np.shape[1]):
+                    if scores_np[out_idx, in_idx] <= threshold:
+                        self._set_edge_zero(layer_idx, in_idx, out_idx)
+
+        object.__setattr__(self, "_act_cache", None)
+        object.__setattr__(self, "_attribute_cache", None)
+        object.__setattr__(self, "_symbolic_fits", None)
+        return self
+
+    def remove_node(self, l, i, mode="all"):
+        """
+        Set incoming and/or outgoing edges of node ``(l, i)`` to zero in-place.
+        """
+
+        l = int(l)
+        i = int(i)
+        if mode not in ("all", "up", "down"):
+            raise ValueError("mode must be 'all', 'up', or 'down'.")
+
+        if l > 0 and mode in ("all", "up"):
+            for out_idx in self._node_to_subnode_ids(l, i):
+                for in_idx in range(self.width_in[l - 1]):
+                    self._set_edge_zero(l - 1, in_idx, out_idx)
+
+        if l < self.depth and mode in ("all", "down"):
+            for out_idx in range(self.width_out[l + 1]):
+                self._set_edge_zero(l, i, out_idx)
+
+        object.__setattr__(self, "_act_cache", None)
+        object.__setattr__(self, "_attribute_cache", None)
+        object.__setattr__(self, "_symbolic_fits", None)
+        return self
+
+    def _copy_layer_subset(self, dst_layer, src_layer, in_ids, out_ids):
+        in_ids = jnp.asarray(in_ids, dtype=jnp.int32)
+        out_ids = jnp.asarray(out_ids, dtype=jnp.int32)
+
+        dst_layer.n_in = int(in_ids.shape[0])
+        dst_layer.n_out = int(out_ids.shape[0])
+        dst_layer.grid.G = int(src_layer.grid.G)
+        dst_layer.grid.grid_range = tuple(src_layer.grid.grid_range)
+        dst_layer.grid.grid_e = float(src_layer.grid.grid_e)
+
+        if self.layer_type == "base":
+            old_basis = src_layer.c_basis[...].reshape(src_layer.n_out, src_layer.n_in, -1)
+            new_basis = jnp.take(jnp.take(old_basis, out_ids, axis=0), in_ids, axis=1)
+            dst_layer.c_basis = nnx.Param(new_basis.reshape(out_ids.shape[0] * in_ids.shape[0], -1))
+
+            old_grid = src_layer.grid.item.reshape(src_layer.n_out, src_layer.n_in, -1)
+            new_grid = jnp.take(jnp.take(old_grid, out_ids, axis=0), in_ids, axis=1)
+            dst_layer.grid.item = new_grid.reshape(out_ids.shape[0] * in_ids.shape[0], -1)
+            dst_layer.grid.n_in = int(in_ids.shape[0])
+            dst_layer.grid.n_out = int(out_ids.shape[0])
+        else:
+            new_basis = jnp.take(jnp.take(src_layer.c_basis[...], out_ids, axis=0), in_ids, axis=1)
+            dst_layer.c_basis = nnx.Param(new_basis)
+            dst_layer.grid.item = src_layer.grid.item[in_ids]
+            dst_layer.grid.n_nodes = int(in_ids.shape[0])
+
+        if src_layer.c_spl is not None:
+            dst_layer.c_spl = nnx.Param(jnp.take(jnp.take(src_layer.c_spl[...], out_ids, axis=0), in_ids, axis=1))
+        else:
+            dst_layer.c_spl = None
+
+        if src_layer.residual is not None:
+            dst_layer.c_res = nnx.Param(jnp.take(jnp.take(src_layer.c_res[...], out_ids, axis=0), in_ids, axis=1))
+
+        if src_layer.bias is not None:
+            dst_layer.bias = nnx.Param(src_layer.bias[...][out_ids])
+        else:
+            dst_layer.bias = None
+
+    def _prune_with_active_nodes(self, active_nodes: Sequence[Sequence[int]]):
+        active_nodes = [list(map(int, ids)) for ids in active_nodes]
+        if len(active_nodes) != self.depth + 1:
+            raise ValueError(f"Expected {self.depth + 1} active-node lists.")
+
+        new_width = []
+        new_mult_arity: list[list[int]] = []
+
+        for width_idx, node_ids in enumerate(active_nodes):
+            n_sum = self.width[width_idx][0]
+            sum_count = sum(node_id < n_sum for node_id in node_ids)
+            mult_ids = [node_id - n_sum for node_id in node_ids if node_id >= n_sum]
+            mult_count = len(mult_ids)
+            if mult_count == 0:
+                new_width.append(sum_count)
+            else:
+                new_width.append([sum_count, mult_count])
+
+            arities = self._arity_list_for_width(width_idx)
+            new_mult_arity.append([arities[mult_id] for mult_id in mult_ids])
+
+        mult_arity = self.mult_arity if self.mult_homo else new_mult_arity
+        model = MultKAN(
+            width=new_width,
+            layer_type=self.layer_type,
+            required_parameters=self._current_layer_parameters(),
+            mult_arity=mult_arity,
+            seed=self.seed,
+        )
+
+        old_input_id = np.asarray(getattr(self, "input_id", np.arange(self.width_in[0])))
+        object.__setattr__(model, "input_id", old_input_id[np.asarray(active_nodes[0], dtype=int)])
+
+        for layer_idx in range(self.depth):
+            in_ids = active_nodes[layer_idx]
+            out_ids = self._nodes_to_subnode_ids(layer_idx + 1, active_nodes[layer_idx + 1])
+            self._copy_layer_subset(model.layers[layer_idx], self.layers[layer_idx], in_ids, out_ids)
+
+            node_ids = jnp.asarray(active_nodes[layer_idx + 1], dtype=jnp.int32)
+            subnode_ids = jnp.asarray(out_ids, dtype=jnp.int32)
+            model.node_bias[layer_idx] = nnx.Param(self.node_bias[layer_idx][...][node_ids])
+            model.node_scale[layer_idx] = nnx.Param(self.node_scale[layer_idx][...][node_ids])
+            model.subnode_bias[layer_idx] = nnx.Param(self.subnode_bias[layer_idx][...][subnode_ids])
+            model.subnode_scale[layer_idx] = nnx.Param(self.subnode_scale[layer_idx][...][subnode_ids])
+
+        return model
+
+    def prune_node(self, threshold=1e-2, mode="auto", active_neurons_id=None, cache=None):
+        """
+        Return a smaller MKAN with hidden nodes pruned by attribution.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to prune_node().")
+
+        if active_neurons_id is not None:
+            mode = "manual"
+        if mode not in ("auto", "manual"):
+            raise ValueError("mode must be 'auto' or 'manual'.")
+
+        attr = self.attribute(cache)
+        active_nodes = [list(range(self.width_in[0]))]
+
+        for width_idx in range(1, self.depth):
+            if mode == "manual":
+                ids = list(map(int, active_neurons_id[width_idx - 1]))
+            else:
+                scores = np.asarray(attr["node_scores"][width_idx])
+                ids = np.where(scores > threshold)[0].astype(int).tolist()
+                if not ids and scores.size:
+                    ids = [int(np.argmax(scores))]
+            active_nodes.append(ids)
+
+        active_nodes.append(list(range(self.width_in[-1])))
+        return self._prune_with_active_nodes(active_nodes)
+
+    def prune_input(self, threshold=1e-2, active_inputs=None, cache=None):
+        """
+        Return a smaller MKAN that keeps only selected input features.
+
+        The returned model keeps ``input_id`` so it can still be called with the
+        original full feature matrix.
+        """
+
+        if active_inputs is None:
+            if cache is None:
+                cache = self._act_cache
+            if cache is None:
+                raise ValueError("Call get_act(x) first or pass a cache to prune_input().")
+            attr = self.attribute(cache)
+            scores = np.asarray(attr["feature_score"])
+            active_inputs = np.where(scores > threshold)[0].astype(int).tolist()
+            if not active_inputs and scores.size:
+                active_inputs = [int(np.argmax(scores))]
+            print("keep:", [idx in active_inputs for idx in range(self.width_in[0])])
+
+        active_nodes = [list(map(int, active_inputs))]
+        for width_idx in range(1, self.depth + 1):
+            active_nodes.append(list(range(self.width_in[width_idx])))
+        return self._prune_with_active_nodes(active_nodes)
+
+    def prune(self, node_th=1e-2, edge_th=3e-2, cache=None):
+        """
+        Return a smaller node-pruned MKAN and zero low-attribution edges.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to prune().")
+
+        model = self.prune_node(threshold=node_th, cache=cache)
+        x = cache.get("raw_input", cache["acts"][0])
+        new_cache = model.get_act(x)
+        model.prune_edge(threshold=edge_th, cache=new_cache)
+        model.get_act(x)
+        return model
+
+    def _ensure_symbolic_fits(self):
+        if self._symbolic_fits is None:
+            fits = []
+            for layer_idx in range(self.depth):
+                fits.append(
+                    [
+                        [None for _ in range(self.width_in[layer_idx])]
+                        for _ in range(self.width_out[layer_idx + 1])
+                    ]
+                )
+            object.__setattr__(self, "_symbolic_fits", fits)
+
+    @staticmethod
+    def _symbolic_library():
+        import sympy
+
+        with np.errstate(all="ignore"):
+            lib = {
+                "x": (lambda x: x, lambda x: x, 1),
+                "x^2": (lambda x: x**2, lambda x: x**2, 2),
+                "x^3": (lambda x: x**3, lambda x: x**3, 3),
+                "x^4": (lambda x: x**4, lambda x: x**4, 3),
+                "x^5": (lambda x: x**5, lambda x: x**5, 3),
+                "1/x": (lambda x: 1 / x, lambda x: 1 / x, 2),
+                "1/x^2": (lambda x: 1 / x**2, lambda x: 1 / x**2, 2),
+                "1/x^3": (lambda x: 1 / x**3, lambda x: 1 / x**3, 3),
+                "sqrt": (lambda x: np.sqrt(x), lambda x: sympy.sqrt(x), 2),
+                "x^0.5": (lambda x: np.sqrt(x), lambda x: sympy.sqrt(x), 2),
+                "x^1.5": (lambda x: np.sqrt(x) ** 3, lambda x: sympy.sqrt(x) ** 3, 4),
+                "1/sqrt(x)": (lambda x: 1 / np.sqrt(x), lambda x: 1 / sympy.sqrt(x), 2),
+                "exp": (lambda x: np.exp(x), lambda x: sympy.exp(x), 2),
+                "log": (lambda x: np.log(x), lambda x: sympy.log(x), 2),
+                "abs": (lambda x: np.abs(x), lambda x: sympy.Abs(x), 3),
+                "sin": (lambda x: np.sin(x), lambda x: sympy.sin(x), 2),
+                "cos": (lambda x: np.cos(x), lambda x: sympy.cos(x), 2),
+                "tan": (lambda x: np.tan(x), lambda x: sympy.tan(x), 3),
+                "tanh": (lambda x: np.tanh(x), lambda x: sympy.tanh(x), 3),
+                "sgn": (lambda x: np.sign(x), lambda x: sympy.sign(x), 3),
+                "arcsin": (lambda x: np.arcsin(x), lambda x: sympy.asin(x), 4),
+                "arccos": (lambda x: np.arccos(x), lambda x: sympy.acos(x), 4),
+                "arctan": (lambda x: np.arctan(x), lambda x: sympy.atan(x), 4),
+                "arctanh": (lambda x: np.arctanh(x), lambda x: sympy.atanh(x), 4),
+                "0": (lambda x: x * 0.0, lambda x: x * 0, 0),
+                "gaussian": (lambda x: np.exp(-(x**2)), lambda x: sympy.exp(-(x**2)), 3),
+            }
+        return lib
+
+    @staticmethod
+    def _nan_to_num(values):
+        return np.nan_to_num(values, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    @classmethod
+    def _fit_symbolic_params(
+        cls,
+        x,
+        y,
+        fun: Callable[[np.ndarray], np.ndarray],
+        a_range=(-10, 10),
+        b_range=(-10, 10),
+        grid_number=101,
+        iteration=3,
+    ):
+        x = np.asarray(x, dtype=float).reshape(-1)
+        y = np.asarray(y, dtype=float).reshape(-1)
+        if x.size == 0 or y.size == 0:
+            return np.array([1.0, 0.0, 0.0, 0.0]), -math.inf
+
+        a_range = [float(a_range[0]), float(a_range[1])]
+        b_range = [float(b_range[0]), float(b_range[1])]
+        best_a = 1.0
+        best_b = 0.0
+        best_r2 = -math.inf
+
+        for _ in range(iteration):
+            a_values = np.linspace(a_range[0], a_range[1], grid_number)
+            b_values = np.linspace(b_range[0], b_range[1], grid_number)
+            a_grid, b_grid = np.meshgrid(a_values, b_values, indexing="ij")
+            with np.errstate(all="ignore"):
+                post_fun = fun(a_grid[None, :, :] * x[:, None, None] + b_grid[None, :, :])
+            post_fun = cls._nan_to_num(post_fun)
+
+            x_mean = np.mean(post_fun, axis=0, keepdims=True)
+            y_mean = np.mean(y)
+            numerator = np.sum((post_fun - x_mean) * (y[:, None, None] - y_mean), axis=0) ** 2
+            denominator = (
+                np.sum((post_fun - x_mean) ** 2, axis=0)
+                * np.sum((y - y_mean) ** 2)
+                + 1e-12
+            )
+            r2 = cls._nan_to_num(numerator / denominator)
+            best_flat = int(np.argmax(r2))
+            a_id, b_id = np.unravel_index(best_flat, r2.shape)
+            best_a = float(a_values[a_id])
+            best_b = float(b_values[b_id])
+            best_r2 = float(r2[a_id, b_id])
+
+            a_low = max(0, a_id - 1)
+            a_high = min(grid_number - 1, a_id + 1)
+            b_low = max(0, b_id - 1)
+            b_high = min(grid_number - 1, b_id + 1)
+            a_range = [float(a_values[a_low]), float(a_values[a_high])]
+            b_range = [float(b_values[b_low]), float(b_values[b_high])]
+
+        with np.errstate(all="ignore"):
+            post_fun = cls._nan_to_num(fun(best_a * x + best_b))
+
+        if np.std(post_fun) < 1e-12:
+            c_best = 0.0
+            d_best = float(np.mean(y))
+        else:
+            design = np.stack([post_fun, np.ones_like(post_fun)], axis=1)
+            c_best, d_best = np.linalg.lstsq(design, y, rcond=None)[0]
+
+        return np.array([best_a, best_b, float(c_best), float(d_best)]), best_r2
+
+    def _edge_xy(self, l, i, j, cache=None):
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache.")
+        return (
+            np.asarray(cache["acts"][int(l)][:, int(i)]),
+            np.asarray(cache["postacts"][int(l)][:, int(j), int(i)]),
+        )
+
+    def fix_symbolic(
+        self,
+        l,
+        i,
+        j,
+        fun_name,
+        fit_params_bool=True,
+        a_range=(-10, 10),
+        b_range=(-10, 10),
+        verbose=True,
+        cache=None,
+    ):
+        """
+        Store a symbolic approximation for edge ``(l, i, j)``.
+
+        Unlike pykan's Torch implementation, this does not change the JAX
+        forward pass; it records an analysis-only fit consumed by
+        ``symbolic_formula``.
+        """
+
+        lib = self._symbolic_library()
+        if fun_name not in lib:
+            raise ValueError(f"Unknown symbolic function {fun_name!r}.")
+
+        if fun_name == "0":
+            params = np.array([1.0, 0.0, 0.0, 0.0])
+            r2 = -math.inf
+        elif fit_params_bool:
+            x, y = self._edge_xy(l, i, j, cache=cache)
+            params, r2 = self._fit_symbolic_params(
+                x, y, lib[fun_name][0], a_range=a_range, b_range=b_range
+            )
+            if verbose:
+                print(f"r2 is {r2}")
+        else:
+            params = np.array([1.0, 0.0, 1.0, 0.0])
+            r2 = math.nan
+
+        self._ensure_symbolic_fits()
+        self._symbolic_fits[int(l)][int(j)][int(i)] = {
+            "function": fun_name,
+            "params": params.tolist(),
+            "r2": float(r2) if np.isfinite(r2) else r2,
+            "complexity": lib[fun_name][2],
+        }
+        return r2
+
+    def unfix_symbolic(self, l, i, j):
+        self._ensure_symbolic_fits()
+        self._symbolic_fits[int(l)][int(j)][int(i)] = None
+
+    def unfix_symbolic_all(self):
+        object.__setattr__(self, "_symbolic_fits", None)
+
+    def suggest_symbolic(
+        self,
+        l,
+        i,
+        j,
+        a_range=(-10, 10),
+        b_range=(-10, 10),
+        lib=None,
+        topk=5,
+        verbose=True,
+        r2_loss_fun=None,
+        c_loss_fun=None,
+        weight_simple=0.8,
+        cache=None,
+    ):
+        """
+        Fit candidate symbolic functions to one edge and return the best one.
+        """
+
+        symbolic_lib = self._symbolic_library()
+        if lib is not None:
+            symbolic_lib = {name: symbolic_lib[name] for name in lib}
+
+        if r2_loss_fun is None:
+            r2_loss_fun = lambda value: np.log2(np.maximum(1e-12, 1 + 1e-5 - value))
+        if c_loss_fun is None:
+            c_loss_fun = lambda value: value
+
+        x, y = self._edge_xy(l, i, j, cache=cache)
+        rows = []
+        for name, (fun, _sym_fun, complexity) in symbolic_lib.items():
+            if name == "0":
+                params = np.array([1.0, 0.0, 0.0, 0.0])
+                r2 = 0.0
+            else:
+                params, r2 = self._fit_symbolic_params(
+                    x, y, fun, a_range=a_range, b_range=b_range
+                )
+            rows.append(
+                {
+                    "function": name,
+                    "params": params,
+                    "fitting r2": float(r2),
+                    "complexity": float(complexity),
+                }
+            )
+
+        for row in rows:
+            row["r2 loss"] = float(r2_loss_fun(row["fitting r2"]))
+            row["complexity loss"] = float(c_loss_fun(row["complexity"]))
+            row["total loss"] = (
+                weight_simple * row["complexity loss"]
+                + (1 - weight_simple) * row["r2 loss"]
+            )
+
+        rows = sorted(rows, key=lambda row: row["total loss"])
+        top_rows = rows[: min(int(topk), len(rows))]
+
+        if verbose:
+            try:
+                import pandas as pd
+
+                print(pd.DataFrame([{k: v for k, v in row.items() if k != "params"} for row in top_rows]))
+            except Exception:
+                for row in top_rows:
+                    print({k: v for k, v in row.items() if k != "params"})
+
+        best = rows[0]
+        return (
+            best["function"],
+            symbolic_lib[best["function"]][0],
+            best["fitting r2"],
+            best["complexity"],
+        )
+
+    def auto_symbolic(
+        self,
+        a_range=(-10, 10),
+        b_range=(-10, 10),
+        lib=None,
+        verbose=1,
+        weight_simple=0.8,
+        r2_threshold=0.0,
+        cache=None,
+    ):
+        """
+        Fit symbolic approximations for every edge.
+
+        The fitted functions are analysis metadata; they are used by
+        ``symbolic_formula`` and do not replace the learned JAX spline layers.
+        """
+
+        if cache is None:
+            cache = self._act_cache
+        if cache is None:
+            raise ValueError("Call get_act(x) first or pass a cache to auto_symbolic().")
+
+        self._ensure_symbolic_fits()
+        symbolic_lib = self._symbolic_library()
+        if lib is not None:
+            symbolic_lib = {name: symbolic_lib[name] for name in lib}
+
+        for layer_idx in range(self.depth):
+            edge_scale = np.asarray(cache["edge_actscale"][layer_idx])
+            for in_idx in range(self.width_in[layer_idx]):
+                for out_idx in range(self.width_out[layer_idx + 1]):
+                    if edge_scale[out_idx, in_idx] < 1e-12:
+                        self.fix_symbolic(
+                            layer_idx,
+                            in_idx,
+                            out_idx,
+                            "0",
+                            verbose=False,
+                            cache=cache,
+                        )
+                        if verbose >= 1:
+                            print(f"fixing ({layer_idx},{in_idx},{out_idx}) with 0")
+                        continue
+
+                    name, _fun, r2, complexity = self.suggest_symbolic(
+                        layer_idx,
+                        in_idx,
+                        out_idx,
+                        a_range=a_range,
+                        b_range=b_range,
+                        lib=list(symbolic_lib.keys()),
+                        verbose=False,
+                        weight_simple=weight_simple,
+                        cache=cache,
+                    )
+                    if r2 >= r2_threshold:
+                        self.fix_symbolic(
+                            layer_idx,
+                            in_idx,
+                            out_idx,
+                            name,
+                            a_range=a_range,
+                            b_range=b_range,
+                            verbose=False,
+                            cache=cache,
+                        )
+                        if verbose >= 1:
+                            print(
+                                f"fixing ({layer_idx},{in_idx},{out_idx}) "
+                                f"with {name}, r2={r2}, c={complexity}"
+                            )
+                    else:
+                        self.fix_symbolic(
+                            layer_idx,
+                            in_idx,
+                            out_idx,
+                            "0",
+                            verbose=False,
+                            cache=cache,
+                        )
+                        if verbose >= 1:
+                            print(
+                                f"omitting ({layer_idx},{in_idx},{out_idx}); "
+                                f"best {name} had r2={r2} < {r2_threshold}"
+                            )
+
+    def symbolic_formula(
+        self,
+        var=None,
+        normalizer=None,
+        output_normalizer=None,
+        simplify=False,
+    ):
+        """
+        Compose the fitted symbolic edge functions into output formulas.
+
+        Run ``auto_symbolic`` or ``fix_symbolic`` first.
+        """
+
+        import sympy
+
+        if self._symbolic_fits is None:
+            raise ValueError("Run auto_symbolic() or fix_symbolic() before symbolic_formula().")
+
+        symbolic_lib = self._symbolic_library()
+
+        input_id = getattr(self, "input_id", None)
+        if var is None:
+            if input_id is None:
+                x = [sympy.Symbol(f"x_{idx + 1}") for idx in range(self.width_in[0])]
+            else:
+                x = [sympy.Symbol(f"x_{int(idx) + 1}") for idx in np.asarray(input_id)]
+        elif isinstance(var[0], sympy.Expr):
+            x = list(var)
+        else:
+            x = [sympy.symbols(str(item)) for item in var]
+
+        if input_id is not None and len(x) > self.width_in[0]:
+            x = [x[int(idx)] for idx in np.asarray(input_id)]
+
+        x0 = list(x)
+        if normalizer is not None:
+            mean, std = normalizer
+            if input_id is not None and len(mean) > len(x):
+                mean = np.asarray(mean)[np.asarray(input_id)]
+                std = np.asarray(std)[np.asarray(input_id)]
+            x = [(x[idx] - mean[idx]) / std[idx] for idx in range(len(x))]
+
+        symbolic_acts = [x]
+        symbolic_acts_premult = []
+
+        for layer_idx in range(self.depth):
+            y = []
+            for out_idx in range(self.width_out[layer_idx + 1]):
+                expr = sympy.Integer(0)
+                for in_idx in range(self.width_in[layer_idx]):
+                    fit = self._symbolic_fits[layer_idx][out_idx][in_idx]
+                    if fit is None:
+                        raise ValueError(
+                            f"Missing symbolic fit for edge ({layer_idx},{in_idx},{out_idx})."
+                        )
+                    name = fit["function"]
+                    a, b, c, d = fit["params"]
+                    sym_fun = symbolic_lib[name][1]
+                    expr += c * sym_fun(a * x[in_idx] + b) + d
+
+                layer = self.layers[layer_idx]
+                if layer.bias is not None:
+                    expr += float(np.asarray(layer.bias[...][out_idx]))
+
+                expr = (
+                    float(np.asarray(self.subnode_scale[layer_idx][...][out_idx])) * expr
+                    + float(np.asarray(self.subnode_bias[layer_idx][...][out_idx]))
+                )
+                y.append(sympy.simplify(expr) if simplify else expr)
+
+            symbolic_acts_premult.append(y)
+
+            n_sum = self.width[layer_idx + 1][0]
+            arities = self._arity_list_for_width(layer_idx + 1)
+            x_next = y[:n_sum]
+            offset = n_sum
+            for arity in arities:
+                term = sympy.Integer(1)
+                for sub_idx in range(offset, offset + arity):
+                    term *= y[sub_idx]
+                x_next.append(sympy.simplify(term) if simplify else term)
+                offset += arity
+
+            for node_idx in range(len(x_next)):
+                x_next[node_idx] = (
+                    float(np.asarray(self.node_scale[layer_idx][...][node_idx])) * x_next[node_idx]
+                    + float(np.asarray(self.node_bias[layer_idx][...][node_idx]))
+                )
+                if simplify:
+                    x_next[node_idx] = sympy.simplify(x_next[node_idx])
+
+            x = x_next
+            symbolic_acts.append(x)
+
+        if output_normalizer is not None:
+            means, stds = output_normalizer
+            symbolic_acts[-1] = [
+                symbolic_acts[-1][idx] * stds[idx] + means[idx]
+                for idx in range(len(symbolic_acts[-1]))
+            ]
+            if simplify:
+                symbolic_acts[-1] = [sympy.simplify(expr) for expr in symbolic_acts[-1]]
+
+        object.__setattr__(self, "symbolic_acts", symbolic_acts)
+        object.__setattr__(self, "symbolic_acts_premult", symbolic_acts_premult)
+        return symbolic_acts[-1], x0
+
     def plot(
         self,
         cache=None,
@@ -375,6 +1174,7 @@ class MultKAN(nnx.Module):
         return figures
 
     def __call__(self, x):
+        x = self._prepare_input(x)
         for idx, layer in enumerate(self.layers):
             x = layer(x)
             x = self.subnode_scale[idx][...][None, :] * x + self.subnode_bias[idx][...][None, :]

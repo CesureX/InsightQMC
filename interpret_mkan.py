@@ -123,10 +123,19 @@ def _build_mkan(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any]) -> M
         seed=spec["seed"],
     )
     graphdef, _, static_state = nnx.split(model_template, nnx.Param, ...)
-    static_state = checkpoint.get("mkan_static_state") or static_state
+    checkpoint_static_state = checkpoint.get("mkan_static_state")
     params = checkpoint["params"]
     mkan_params = params["mkan"] if isinstance(params, dict) and "mkan" in params else params
-    return nnx.merge(graphdef, mkan_params, static_state)
+    if checkpoint_static_state is None:
+        return nnx.merge(graphdef, mkan_params, static_state)
+    try:
+        return nnx.merge(graphdef, mkan_params, checkpoint_static_state)
+    except Exception as exc:
+        print(
+            "Checkpoint MKAN static state is incompatible with the current "
+            f"interpretation model; using fresh static state instead. ({type(exc).__name__}: {exc})"
+        )
+        return nnx.merge(graphdef, mkan_params, static_state)
 
 
 def _feature_names(natoms: int, input_dim: int) -> list[str]:
