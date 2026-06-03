@@ -5,13 +5,13 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 4096,
+        'batch_size': 2048, #4096
         'layer_dims': [4, 16, 16],
         'g': [10, 10, 10, 10],
-        'k': [3, 3, 3, 3],
+        'k': [3, 3, 3, 3], #7
         'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'iterations': 10000,
-        'preiterations': 10000,
+        'iterations': 100000,
+        'preiterations': 5000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -27,12 +27,12 @@ def default() -> ml_collections.ConfigDict:
         'scf_fraction': 0.0,
         'nfeatures': 4,
         'mcmc_steps': 30,
-        'mcmc_width': 0.005,
+        'mcmc_width': 0.02, #0.02 for C,
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
         'clip_local_energy': 5.0,
         'use_scan': False,
-        'complex_output': False,
+        'complex_output': True, #True is recommended for better performance
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
         'laplacian_method': 'default',
         't_init': 0,
@@ -40,18 +40,17 @@ def default() -> ml_collections.ConfigDict:
         'learning_rate': 0.00004,
         'learning_rate_decay': 20000.0,
         'envelope_on': True,
-        'envelope_type': 'isotropic', #isotropic, chebyshev
-        'envelope_degree': 5,
+        'envelope_type': 'chebyshev', #(isotropic), (chebyshev) is recommended for better performance
+        'envelope_degree': 7,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
             # [r_ae, ae] for every atom, so input_dim defaults to nfeatures.
             # The final output is 2 * nelectrons real channels when
-            # complex_output=True, interpreted as complex orbital values.
             'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
-            # 'layer_type': 'chebyshev'
+            #'layer_type': 'chebyshev',
             # 'layer_type': 'legendre'
             # 'layer_type': 'rbf'
             # 'layer_type': 'sine'
@@ -71,14 +70,14 @@ def default() -> ml_collections.ConfigDict:
         },
         'system': {
             'molecule': [system.Atom('C', (0, 0, 0))],
-            'electrons': (4, 2),
+            'electrons': (4,2),
         },
         'jastrow': {
             'ee': True,
-            'type': 'ferminet', #pade, ferminet
+            'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/carbon_spinblock_test_LZW5182100',
+            'root_dir': 'outputs/C_LZW6022246',
             'checkpoint_every': 50,
             'metrics_every': 5,
             'resume': True,

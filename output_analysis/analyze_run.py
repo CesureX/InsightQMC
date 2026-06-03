@@ -53,17 +53,23 @@ class ScalarSeries:
     values: np.ndarray
     wall_times: np.ndarray
 
-    def tail(self, tail: int | None = None, burnin_step: int | None = None) -> "ScalarSeries":
+    def tail(self, tail: int | None = None, burnin_step: int | None = None, tail_fraction: float | None = None) -> "ScalarSeries":
         mask = np.ones_like(self.steps, dtype=bool)
         if burnin_step is not None:
             mask &= self.steps >= burnin_step
         steps = self.steps[mask]
         values = self.values[mask]
         wall_times = self.wall_times[mask]
-        if tail is not None and tail > 0 and len(steps) > tail:
-            steps = steps[-tail:]
-            values = values[-tail:]
-            wall_times = wall_times[-tail:]
+        if tail is not None and tail > 0:
+            tail_count = tail
+        elif tail_fraction is not None and tail_fraction > 0.0:
+            tail_count = max(1, int(math.ceil(len(steps) * tail_fraction)))
+        else:
+            tail_count = None
+        if tail_count is not None and len(steps) > tail_count:
+            steps = steps[-tail_count:]
+            values = values[-tail_count:]
+            wall_times = wall_times[-tail_count:]
         return ScalarSeries(self.tag, steps, values, wall_times)
 
 
@@ -157,13 +163,28 @@ def _plot_series(ax, item: ScalarSeries, title: str, rolling: int = 1) -> None:
     ax.grid(True, alpha=0.25)
 
 
-def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None, burnin_step: int | None) -> None:
+def _loss_ylims_for_run(run_dir: Path) -> tuple[tuple[float, float], tuple[float, float]]:
+    config_path = run_dir / "config.json"
+    try:
+        with config_path.open() as handle:
+            cfg = json.load(handle)
+    except FileNotFoundError:
+        return (-40.0, -30.0), (-40.0, -35.0)
+    molecule = cfg.get("system", {}).get("molecule", [])
+    symbols = {str(atom.get("symbol", "")).upper() for atom in molecule if isinstance(atom, dict)}
+    if symbols == {"H"}:
+        return (-1.0, 1.0), (-1.0, 1.0)
+    if symbols == {"LI"}:
+        return (-9.0, 0.0), (-9.0, 0.0)
+    return (-40.0, -30.0), (-40.0, -35.0)
+
+def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None, training_loss_ylim: tuple[float, float], tail_loss_ylim: tuple[float, float]) -> None:
     if plt is None:
         raise RuntimeError(f"matplotlib is unavailable: {_MATPLOTLIB_ERROR}")
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
     plots = [
-        ("train/loss", "train/loss", 100, (-50.0, 0.0)),
+        ("train/loss", "train/loss", 100, training_loss_ylim),
         ("train/variance", "train/variance", 100, (0.0, 10000.0)),
         ("train/pmove", "train/pmove", 100, None),
         ("train/mcmc_width", "train/mcmc_width", 1, None),
@@ -180,7 +201,17 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
     plt.close(fig)
 
     if "train/loss" in series:
-        tail_series = series["train/loss"].tail(tail=tail, burnin_step=burnin_step)
+        fig, ax = plt.subplots(figsize=(10, 4.8), constrained_layout=True)
+        _plot_series(ax, series["train/loss"], "train/loss", rolling=100)
+        ax.set_ylim(-0.55, 0.0)
+        ax.set_xlim(0, 15000)
+        ax.set_ylabel("energy / Eh")
+        ax.set_title("train/loss")
+        fig.savefig(out_dir / "train_loss.png", dpi=180)
+        plt.close(fig)
+
+    if "train/loss" in series:
+        tail_series = series["train/loss"].tail(tail=tail, burnin_step=burnin_step, tail_fraction=tail_fraction)
         if len(tail_series.values) > 0:
             mean = float(np.mean(tail_series.values))
             sem = float(np.std(tail_series.values, ddof=1) / math.sqrt(len(tail_series.values))) if len(tail_series.values) > 1 else math.nan
@@ -196,7 +227,7 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
                     alpha=0.18,
                     label=f"naive SEM = {sem:.2e} Eh",
                 )
-            ax.set_ylim(-50.0, 0.0)
+            ax.set_ylim(*tail_loss_ylim)
             ax.set_title("train/loss tail statistics")
             ax.set_xlabel("step")
             ax.set_ylabel("energy / Eh")
@@ -206,12 +237,12 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
             plt.close(fig)
 
 
-def summarize(series: dict[str, ScalarSeries], tail: int | None, burnin_step: int | None) -> dict[str, dict[str, float | int | None]]:
+def summarize(series: dict[str, ScalarSeries], tail: int | None, burnin_step: int | None, tail_fraction: float | None) -> dict[str, dict[str, float | int | None]]:
     summary = {}
     for tag in MAIN_TAGS:
         if tag not in series:
             continue
-        item = series[tag].tail(tail=tail, burnin_step=burnin_step)
+        item = series[tag].tail(tail=tail, burnin_step=burnin_step, tail_fraction=tail_fraction)
         values = item.values
         if len(values) == 0:
             continue
@@ -248,7 +279,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", required=True, type=Path, help="Run directory, e.g. outputs/carbon_formal_001")
     parser.add_argument("--out", type=Path, default=None, help="Output directory. Defaults to <run>/analysis")
-    parser.add_argument("--tail", type=int, default=5000, help="Use only the last N scalar points for summary/tail plot. Use 0 for all.")
+    parser.add_argument("--tail", type=int, default=None, help="Use only the last N scalar points for summary/tail plot. Overrides --tail-fraction; use 0 for all.")
+    parser.add_argument("--tail-fraction", type=float, default=0.1, help="Use the last fraction of scalar points for summary/tail plot when --tail is unset.")
     parser.add_argument("--burnin-step", type=int, default=None, help="Ignore scalar points before this step for summary/tail plot.")
     parser.add_argument("--no-plots", action="store_true", help="Only write CSV and summary JSON.")
     return parser.parse_args(argv)
@@ -259,15 +291,18 @@ def main(argv: Iterable[str] | None = None) -> None:
     run_dir = args.run.expanduser().resolve()
     out_dir = (args.out.expanduser().resolve() if args.out else run_dir / "analysis")
     out_dir.mkdir(parents=True, exist_ok=True)
-    tail = None if args.tail == 0 else args.tail
+    tail = None if args.tail in (None, 0) else args.tail
+    tail_fraction = None if args.tail is not None else args.tail_fraction
+
+    training_loss_ylim, tail_loss_ylim = _loss_ylims_for_run(run_dir)
 
     series = load_scalars(run_dir)
     write_csv(series, out_dir)
-    summary = summarize(series, tail=tail, burnin_step=args.burnin_step)
+    summary = summarize(series, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction)
     with (out_dir / "summary.json").open("w") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
     if not args.no_plots:
-        make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step)
+        make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction, training_loss_ylim=training_loss_ylim, tail_loss_ylim=tail_loss_ylim)
     print(f"Loaded {len(series)} scalar tags from {run_dir}")
     print(f"Wrote analysis to {out_dir}")
     print_summary(summary)

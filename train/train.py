@@ -259,8 +259,17 @@ class VMCTrainer:
             same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(self.electrons)
             init_jastrow = jastrow.init_ferminet_ee_jastrow
             apply_jastrow = jastrow.apply_ferminet_ee_jastrow
+        elif self.jastrow_type == 'ferminet_plus':
+            same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(self.electrons)
+            init_jastrow = jastrow.init_ferminet_plus_ee_jastrow
+            apply_jastrow = jastrow.apply_ferminet_plus_ee_jastrow
+        elif self.jastrow_type == 'ferminet_three_body':
+            same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(self.electrons)
+            init_jastrow = jastrow.init_ferminet_three_body_jastrow
+            apply_jastrow = jastrow.apply_ferminet_three_body_jastrow
         else:
             raise ValueError(f'Unsupported jastrow.type={self.jastrow_type!r}.')
+        jastrow_uses_r_ae = self.jastrow_type == 'ferminet_three_body'
         jastrow_params = init_jastrow() if self.jastrow_ee else None
 
         def kan_init(key):
@@ -355,13 +364,22 @@ class VMCTrainer:
             if self.jastrow_ee:
                 if not (isinstance(params, dict) and 'jastrow_ee' in params):
                     raise ValueError('Missing Jastrow parameters for electron-electron Jastrow.')
-                _, _, _, r_ee = _construct_input_features(pos, atoms, ndim=3)
-                logmag = logmag + apply_jastrow(
-                    r_ee,
-                    params['jastrow_ee'],
-                    same_spin_pairs,
-                    opposite_spin_pairs,
-                )
+                _, _, r_ae, r_ee = _construct_input_features(pos, atoms, ndim=3)
+                if jastrow_uses_r_ae:
+                    logmag = logmag + apply_jastrow(
+                        r_ee,
+                        r_ae,
+                        params['jastrow_ee'],
+                        same_spin_pairs,
+                        opposite_spin_pairs,
+                    )
+                else:
+                    logmag = logmag + apply_jastrow(
+                        r_ee,
+                        params['jastrow_ee'],
+                        same_spin_pairs,
+                        opposite_spin_pairs,
+                    )
             return phase, logmag
 
         def logabs_network(params, pos, spins, atoms, charges):
@@ -370,7 +388,7 @@ class VMCTrainer:
         def log_network(params, pos, spins, atoms, charges):
             phase, mag = signed_network(params, pos, spins, atoms, charges)
             if self.complex_output:
-                return mag + 1.j * phase
+                return mag + jnp.log(phase)
             return mag
 
         batch_network = jax.vmap(logabs_network, in_axes=(None, 0, None, None, None), out_axes=0)

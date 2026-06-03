@@ -152,8 +152,15 @@ def _build_network(cfg: ml_collections.ConfigDict):
     elif jastrow_type == 'ferminet':
         same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(electrons)
         apply_jastrow = jastrow.apply_ferminet_ee_jastrow
+    elif jastrow_type == 'ferminet_plus':
+        same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(electrons)
+        apply_jastrow = jastrow.apply_ferminet_plus_ee_jastrow
+    elif jastrow_type == 'ferminet_three_body':
+        same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(electrons)
+        apply_jastrow = jastrow.apply_ferminet_three_body_jastrow
     else:
         raise ValueError(f'Unsupported jastrow.type={jastrow_type!r}.')
+    jastrow_uses_r_ae = jastrow_type == 'ferminet_three_body'
     active_spin_channels = networks.active_spin_channels(electrons)
     full_det = bool(cfg.get('full_det', True))
 
@@ -227,13 +234,22 @@ def _build_network(cfg: ml_collections.ConfigDict):
         determinant = orbitals_apply(params, pos, spins_, atoms_, charges_)
         phase, logmag = networks.logdet_matmul(determinant)
         if bool(cfg.get('jastrow', {}).get('ee', True)):
-            _, _, _, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
-            logmag = logmag + apply_jastrow(
-                r_ee,
-                params['jastrow_ee'],
-                same_spin_pairs,
-                opposite_spin_pairs,
-            )
+            _, _, r_ae, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
+            if jastrow_uses_r_ae:
+                logmag = logmag + apply_jastrow(
+                    r_ee,
+                    r_ae,
+                    params['jastrow_ee'],
+                    same_spin_pairs,
+                    opposite_spin_pairs,
+                )
+            else:
+                logmag = logmag + apply_jastrow(
+                    r_ee,
+                    params['jastrow_ee'],
+                    same_spin_pairs,
+                    opposite_spin_pairs,
+                )
         return phase, logmag
 
     return signed_network, orbitals_apply, atoms, charges, spins, electrons

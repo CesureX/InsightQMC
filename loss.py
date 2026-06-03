@@ -225,16 +225,13 @@ def make_loss(network,
     )
     psi_primal, psi_tangent = jax.jvp(batch_network, primals_network, tangents_network)
     if complex_output:
-      clipped_el = diff + aux_data.clipped_energy
-      term1 = (jnp.dot(clipped_el, jnp.conjugate(psi_tangent)) +
-               jnp.dot(jnp.conjugate(clipped_el), psi_tangent))
-      term2 = jnp.sum(aux_data.clipped_energy*psi_tangent.real)
+      energy_tangent = 2.0 * jnp.real(jnp.vdot(psi_tangent, diff))
       if kfac_jax is not None:
         kfac_jax.register_normal_predictive_distribution(
             psi_primal.real[:, None])
       primals_out = loss.real, aux_data
       device_batch_size = jnp.shape(aux_data.local_energy)[0]
-      tangents_out = ((term1 - 2*term2).real / device_batch_size, aux_data)
+      tangents_out = (energy_tangent / device_batch_size, aux_data)
     else:
       if kfac_jax is not None:
         kfac_jax.register_normal_predictive_distribution(psi_primal[:, None])
