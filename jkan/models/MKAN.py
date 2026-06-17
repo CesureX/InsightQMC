@@ -419,6 +419,10 @@ class MultKAN(nnx.Module):
         in_idx = int(in_idx)
         out_idx = int(out_idx)
 
+        if hasattr(layer, "set_edge_mask"):
+            layer.set_edge_mask(in_idx, out_idx, 0.0)
+            return
+
         if self.layer_type == "base":
             flat_idx = out_idx * layer.n_in + in_idx
             layer.c_basis = nnx.Param(layer.c_basis[...].at[flat_idx, :].set(0.0))
@@ -524,6 +528,11 @@ class MultKAN(nnx.Module):
             dst_layer.bias = nnx.Param(src_layer.bias[...][out_ids])
         else:
             dst_layer.bias = None
+
+        if hasattr(src_layer, "edge_mask") and hasattr(dst_layer, "edge_mask"):
+            dst_layer.edge_mask = nnx.Variable(
+                jnp.take(jnp.take(src_layer.edge_mask[...], out_ids, axis=0), in_ids, axis=1)
+            )
 
     def _prune_with_active_nodes(self, active_nodes: Sequence[Sequence[int]]):
         active_nodes = [list(map(int, ids)) for ids in active_nodes]

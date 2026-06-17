@@ -14,6 +14,9 @@ import networks
 from jkan.models import MultKAN
 from tools.utils import system
 
+'''
+python interpret_mkan.py  --run-dir /vepfs-mlp2/c20250516/250504030/jing/InsightQMC/outputs/C_LZW6022246
+'''
 
 def _load_config(config_path: Path) -> ml_collections.ConfigDict:
     raw_cfg = json.loads(config_path.read_text())
@@ -128,14 +131,7 @@ def _build_mkan(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any]) -> M
     mkan_params = params["mkan"] if isinstance(params, dict) and "mkan" in params else params
     if checkpoint_static_state is None:
         return nnx.merge(graphdef, mkan_params, static_state)
-    try:
-        return nnx.merge(graphdef, mkan_params, checkpoint_static_state)
-    except Exception as exc:
-        print(
-            "Checkpoint MKAN static state is incompatible with the current "
-            f"interpretation model; using fresh static state instead. ({type(exc).__name__}: {exc})"
-        )
-        return nnx.merge(graphdef, mkan_params, static_state)
+    return nnx.merge(graphdef, mkan_params, checkpoint_static_state)
 
 
 def _feature_names(natoms: int, input_dim: int) -> list[str]:

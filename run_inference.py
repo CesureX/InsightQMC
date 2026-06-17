@@ -71,7 +71,7 @@ def _array_partitions(sizes):
     return list(np.cumsum(tuple(int(size) for size in sizes)))[:-1]
 
 
-def _build_network(cfg: ml_collections.ConfigDict):
+def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | None = None):
     molecule = cfg.system.molecule
     electrons = tuple(cfg.system.electrons)
     nelectrons = sum(electrons)
@@ -145,6 +145,9 @@ def _build_network(cfg: ml_collections.ConfigDict):
         seed=int(cfg.seed),
     )
     graphdef, _, static_state = nnx.split(model_template, nnx.Param, ...)
+    checkpoint_static_state = checkpoint.get('mkan_static_state') if checkpoint is not None else None
+    if checkpoint_static_state is not None:
+        static_state = checkpoint_static_state
     jastrow_type = str(cfg.get('jastrow', {}).get('type', 'pade')).lower()
     if jastrow_type == 'pade':
         same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices(electrons)
@@ -257,11 +260,14 @@ def _build_network(cfg: ml_collections.ConfigDict):
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (jnp.ndarray, np.ndarray)):
-        return np.asarray(value).tolist()
+        array = np.asarray(value)
+        if np.iscomplexobj(array):
+            return {'real': array.real.tolist(), 'imag': array.imag.tolist()}
+        return array.tolist()
     if isinstance(value, (np.generic,)):
-        return value.item()
+        return _jsonable(value.item())
     if isinstance(value, complex):
-        return {'real': value.real, 'imag': value.imag}
+        return {'real': float(value.real), 'imag': float(value.imag)}
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
     if isinstance(value, tuple):
@@ -289,7 +295,7 @@ def main() -> None:
     params = checkpoint['params']
     checkpoint_data = checkpoint['data']
 
-    signed_network, orbitals_apply, atoms, charges, spins, electrons = _build_network(cfg)
+    signed_network, orbitals_apply, atoms, charges, spins, electrons = _build_network(cfg, checkpoint)
     positions = _load_positions(Path(args.positions_file).expanduser() if args.positions_file else None, checkpoint_data)
 
     batch_signed_network = jax.vmap(signed_network, in_axes=(None, 0, None, None, None), out_axes=(0, 0))
@@ -314,13 +320,29 @@ def main() -> None:
             complex_output=bool(cfg.complex_output),
             laplacian_method=cfg.laplacian_method,
         )
+        inference_data = networks.KANetsData(
+            positions=positions,
+            spins=spins,
+            atoms=atoms,
+            charges=charges,
+        )
         energy_keys = jax.random.split(jax.random.PRNGKey(int(cfg.seed)), positions.shape[0])
         local_energy_values, energy_mat = jax.vmap(
             local_energy_fn,
-            in_axes=(None, 0, 0, None, None, None),
+            in_axes=(
+                None,
+                0,
+                networks.KANetsData(positions=0, spins=None, atoms=None, charges=None),
+            ),
             out_axes=(0, 0),
-        )(params, energy_keys, positions, spins, atoms, charges)
+        )(params, energy_keys, inference_data)
+        energy_mean = jnp.mean(local_energy_values)
+        energy_variance = jnp.mean(
+            (local_energy_values - energy_mean) * jnp.conj(local_energy_values - energy_mean)
+        ).real
         results['local_energy'] = local_energy_values
+        results['energy_mean'] = energy_mean
+        results['energy_variance'] = energy_variance
         results['local_energy_mat'] = energy_mat
 
     json_ready = _jsonable(results)

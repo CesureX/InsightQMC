@@ -6,12 +6,12 @@ def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 2048, #4096
-        'layer_dims': [4, 16, 16],
-        'g': [10, 10, 10, 10],
-        'k': [3, 3, 3, 3], #7
-        'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'iterations': 100000,
-        'preiterations': 5000,
+        'layer_dims': [4, 8, 2],
+        'g': [10],
+        'k': [3], #7
+        'grid_range': [0, 2],
+        'iterations': 30000,
+        'preiterations': 1000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -57,7 +57,8 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'fourier'
             'input_dim': None,
             'output_dim': None,
-            'width': None,
+            # 'width': [4,[8,4],2], # [input_dim, hidden_dim1, ..., output_dim]
+            'width': [4,8,2], # [input_dim, hidden_dim1, ..., output_dim]
             'mult_arity': 2,
             'required_parameters': None,
             'pretrain_phase_weight': 1.0e-2,
@@ -69,17 +70,17 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': None,
         },
         'system': {
-            'molecule': [system.Atom('C', (0, 0, 0))],
-            'electrons': (4,2),
+            'molecule': [system.Atom('H', (0, 0, 0))],
+            'electrons': (1,0),
         },
         'jastrow': {
             'ee': True,
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/C_LZW6022246',
-            'checkpoint_every': 50,
-            'metrics_every': 5,
+            'root_dir': 'outputs/H_JING0616_only_add',
+            'checkpoint_every': 1000,
+            'metrics_every': 50,
             'resume': True,
             'enable_tensorboard': True,
         },
