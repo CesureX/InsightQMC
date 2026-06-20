@@ -221,7 +221,10 @@ def potential_nuclear_nuclear(charges: Array, atoms: Array) -> jnp.ndarray:
     charges: Shape (natoms). Nuclear charges of the atoms.
     atoms: Shape (natoms, ndim). Positions of the atoms.
   """
-  r_aa = jnp.linalg.norm(atoms[None, ...] - atoms[:, None], axis=-1)
+  # Keep excluded self-interactions away from r=0 so atom gradients remain finite.
+  r_aa = jnp.linalg.norm(
+      atoms[None, ...] - atoms[:, None] + jnp.eye(atoms.shape[0])[..., None],
+      axis=-1)
   return jnp.sum(
       jnp.triu((charges[None, ...] * charges[..., None]) / r_aa, k=1))
 

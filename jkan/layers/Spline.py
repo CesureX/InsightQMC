@@ -90,6 +90,7 @@ class BaseLayer(nnx.Module):
 
         # Initialize the grid
         self.grid = BaseGrid(n_in=n_in, n_out=n_out, k=k, G=G, grid_range=grid_range, grid_e=grid_e)
+        self.edge_mask = nnx.Variable(jnp.ones((n_out, n_in), dtype=jnp.float32))
 
         # If external_weights == True, we initialize weights for the spline functions equal to unity
         if external_weights == True:
@@ -113,6 +114,13 @@ class BaseLayer(nnx.Module):
             self.bias = nnx.Param(jnp.zeros((n_out,)))
         else:
             self.bias = None
+
+    def set_edge_mask(self, in_idx: int, out_idx: int, value: float):
+        """Set the hard mask for edge ``in_idx -> out_idx``."""
+
+        mask = self.edge_mask[...].at[int(out_idx), int(in_idx)].set(float(value))
+        self.edge_mask = nnx.Variable(mask)
+        return self
 
     def basis(self, x):
         """
@@ -584,6 +592,9 @@ class BaseLayer(nnx.Module):
             cnst_res = jnp.expand_dims(self.c_res[...], axis=0).reshape((1, self.n_in * self.n_out))
             # Calculate the entire activation
             y += cnst_res * res # (batch, n_in*n_out)
+
+        edge_mask = self.edge_mask[...].reshape((1, self.n_out * self.n_in))
+        y = y * edge_mask
         
         # Reshape and sum
         y_reshaped = jnp.reshape(y, (batch, self.n_out, self.n_in))
@@ -628,6 +639,9 @@ class BaseLayer(nnx.Module):
                 (1, self.n_in * self.n_out)
             )
             edge_flat += cnst_res * res
+
+        edge_mask = self.edge_mask[...].reshape((1, self.n_out * self.n_in))
+        edge_flat = edge_flat * edge_mask
 
         postacts = jnp.reshape(edge_flat, (batch, self.n_out, self.n_in))
         y = jnp.sum(postacts, axis=2)
@@ -717,6 +731,7 @@ class SplineLayer(nnx.Module):
 
         # Initialize the grid - shape (n_in, G+2k+1)
         self.grid = SplineGrid(n_nodes=n_in, k=k, G=G, grid_range=grid_range, grid_e=grid_e)
+        self.edge_mask = nnx.Variable(jnp.ones((n_out, n_in), dtype=jnp.float32))
 
         # If external_weights == True, we initialize weights for the spline functions equal to unity
         if external_weights == True:
@@ -740,6 +755,13 @@ class SplineLayer(nnx.Module):
             self.bias = nnx.Param(jnp.zeros((n_out,)))
         else:
             self.bias = None
+
+    def set_edge_mask(self, in_idx: int, out_idx: int, value: float):
+        """Set the hard mask for edge ``in_idx -> out_idx``."""
+
+        mask = self.edge_mask[...].at[int(out_idx), int(in_idx)].set(float(value))
+        self.edge_mask = nnx.Variable(mask)
+        return self
 
     def basis(self, x):
         """
@@ -1173,6 +1195,7 @@ class SplineLayer(nnx.Module):
             spl_w = self.c_basis[...] * self.c_spl[..., None] # (n_out, n_in, G+k)
         else:
             spl_w = self.c_basis[...]
+        spl_w = spl_w * self.edge_mask[..., None]
 
         # Reshape spline coefficients
         spl_w = spl_w.reshape(self.n_out, -1) # (n_out, n_in * (G+k))
@@ -1185,7 +1208,7 @@ class SplineLayer(nnx.Module):
             res = self.residual(x) # (batch, n_in)
         
             # Multiply by trainable weights
-            res_w = self.c_res[...] # (n_out, n_in)
+            res_w = self.c_res[...] * self.edge_mask[...] # (n_out, n_in)
             full_res = jnp.matmul(res, res_w.T) # (batch, n_out)
 
             y += full_res # (batch, n_out)
@@ -1212,12 +1235,14 @@ class SplineLayer(nnx.Module):
             spl_w = self.c_basis[...] * self.c_spl[..., None]
         else:
             spl_w = self.c_basis[...]
+        spl_w = spl_w * self.edge_mask[..., None]
 
         postacts = jnp.einsum('bik,oik->boi', Bi, spl_w)
 
         if self.residual is not None:
             res = self.residual(x)
-            postacts += res[:, None, :] * self.c_res[...][None, :, :]
+            res_w = self.c_res[...] * self.edge_mask[...]
+            postacts += res[:, None, :] * res_w[None, :, :]
 
         y = jnp.sum(postacts, axis=2)
 
