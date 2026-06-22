@@ -38,6 +38,47 @@ def construct_input_features(
     return ae, ee, r_ae, r_ee[..., None]
 
 
+def construct_orbital_features(
+    pos: Array,
+    atoms: Array,
+    ndim: int = 3,
+    feature_mode: str = "one_body",
+) -> Array:
+    """Construct per-electron orbital features.
+
+    ``one_body`` keeps the original features [r_ae, ae].
+    ``ee_aggregate`` appends permutation-equivariant electron-electron summaries:
+    sum_j 1/(1+r_ij) and sum_j (r_i-r_j)/(1+r_ij).
+    """
+
+    ae, ee, r_ae, r_ee = construct_input_features(pos, atoms, ndim=ndim)
+    return orbital_features_from_components(ae, ee, r_ae, r_ee, feature_mode=feature_mode)
+
+
+def orbital_features_from_components(
+    ae: Array,
+    ee: Array,
+    r_ae: Array,
+    r_ee: Array,
+    feature_mode: str = "one_body",
+) -> Array:
+    """Construct orbital features from precomputed geometric components."""
+
+    one_body = jnp.concatenate((r_ae, ae), axis=2).reshape(ae.shape[0], -1)
+    mode = str(feature_mode).lower()
+    if mode in ("one_body", "base", "original"):
+        return one_body
+    if mode not in ("ee_aggregate", "ee_agg", "equivariant_ee"):
+        raise ValueError(f"Unsupported orbital feature_mode={feature_mode!r}.")
+
+    n = ee.shape[0]
+    offdiag = (1.0 - jnp.eye(n, dtype=ae.dtype))[..., None]
+    inv_weight = offdiag / (1.0 + r_ee)
+    ee_density = jnp.sum(inv_weight, axis=1)
+    ee_vector = jnp.sum(-ee * inv_weight, axis=1)
+    return jnp.concatenate((one_body, ee_density, ee_vector), axis=1)
+
+
 def active_spin_channels(nspins: Sequence[int]) -> list[int]:
     return [int(spin) for spin in nspins if int(spin) > 0]
 

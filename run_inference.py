@@ -93,6 +93,7 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     ndeterminants = int(cfg.get('ndeterminants', 1))
     use_determinant_weights = bool(cfg.get('determinant_weights', ndeterminants > 1))
     nfeatures = int(cfg.nfeatures)
+    orbital_feature_mode = str(cfg.get('orbital_features', 'one_body')).lower()
 
     atoms = jnp.array([atom.coords for atom in molecule])
     charges = jnp.array([atom.charge for atom in molecule])
@@ -196,8 +197,14 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
 
     def orbitals_apply(params, pos, spins_, atoms_, charges_):
         del spins_, charges_
-        ae, _, r_ae, _ = networks.construct_input_features(pos, atoms_, ndim=3)
-        h_one = jnp.concatenate((r_ae, ae), axis=2).reshape(nelectrons, -1)
+        ae, ee, r_ae, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
+        h_one = networks.orbital_features_from_components(
+            ae,
+            ee,
+            r_ae,
+            r_ee,
+            feature_mode=orbital_feature_mode,
+        )
         orbital_values = apply_mkan(params, h_one)
         if bool(cfg.complex_output):
             real_channel_count = 2 * ndeterminants * nelectrons

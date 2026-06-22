@@ -185,6 +185,7 @@ def main() -> None:
         spec["electrons"],
         spec["input_dim"],
         sample_size,
+        spec["orbital_feature_mode"],
     )
 
     cache = model.get_act(features)
@@ -211,7 +212,11 @@ def main() -> None:
     _save_checkpoint(out_checkpoint, new_checkpoint, overwrite=args.overwrite)
 
     feature_score = np.asarray(attribution["feature_score"])
-    feature_names = _feature_names(spec["natoms"], spec["input_dim"])
+    feature_names = _feature_names(
+        spec["natoms"],
+        spec["input_dim"],
+        spec["orbital_feature_mode"],
+    )
     ranking = np.argsort(-feature_score)
 
     report = {

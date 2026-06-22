@@ -134,6 +134,7 @@ class VMCTrainer:
         self.k = jnp.array(cfg.k)
         self.layer_dims = jnp.array(cfg.layer_dims)
         self.grid_range = cfg.grid_range
+        self.orbital_feature_mode = str(cfg.get('orbital_features', 'one_body')).lower()
 
         self.seed = int(cfg.seed)
         self.seed_electrons_coords = int(cfg.seed_electrons_coords)
@@ -355,8 +356,14 @@ class VMCTrainer:
 
         def orbitals_apply(params, pos, spins, atoms, charges):
             del spins, charges
-            ae, _, r_ae, _ = _construct_input_features(pos, atoms, ndim=3)
-            h_one = jnp.concatenate((r_ae, ae), axis=2).reshape(self.nelectrons, -1)
+            ae, ee, r_ae, r_ee = _construct_input_features(pos, atoms, ndim=3)
+            h_one = networks.orbital_features_from_components(
+                ae,
+                ee,
+                r_ae,
+                r_ee,
+                feature_mode=self.orbital_feature_mode,
+            )
             orbital_values = apply_mkan(params, h_one)
             if self.complex_output:
                 real_channel_count = 2 * self.ndeterminants * self.nelectrons
@@ -497,8 +504,12 @@ class VMCTrainer:
         positions = jnp.reshape(data.positions, (-1, self.nelectrons * 3))
 
         def single_position_features(pos):
-            ae, _, r_ae, _ = _construct_input_features(pos, data.atoms, ndim=3)
-            return jnp.concatenate((r_ae, ae), axis=2).reshape(self.nelectrons, -1)
+            return networks.construct_orbital_features(
+                pos,
+                data.atoms,
+                ndim=3,
+                feature_mode=self.orbital_feature_mode,
+            )
 
         samples = jax.vmap(single_position_features)(positions)
         samples = jnp.reshape(samples, (-1, self.mkan_input_dim))

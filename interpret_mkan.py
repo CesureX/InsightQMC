@@ -88,6 +88,7 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
 
     mkan_cfg = cfg.get("mkan", {})
     layer_type = str(mkan_cfg.get("layer_type", "spline")).lower()
+    orbital_feature_mode = str(cfg.get("orbital_features", "one_body")).lower()
     mkan_input_dim = int(nfeatures if mkan_cfg.get("input_dim", None) is None else mkan_cfg.input_dim)
     output_default = (
         (2 * ndeterminants * nelectrons)
@@ -154,6 +155,7 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
         "electrons": electrons,
         "natoms": len(molecule),
         "input_dim": mkan_input_dim,
+        "orbital_feature_mode": orbital_feature_mode,
         "ndeterminants": ndeterminants,
     }
 
@@ -177,7 +179,7 @@ def _build_mkan(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any]) -> M
     return nnx.merge(graphdef, mkan_params, static_state)
 
 
-def _feature_names(natoms: int, input_dim: int) -> list[str]:
+def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") -> list[str]:
     names = []
     for atom_idx in range(natoms):
         names.extend(
@@ -188,6 +190,8 @@ def _feature_names(natoms: int, input_dim: int) -> list[str]:
                 f"ae_z[{atom_idx}]",
             ]
         )
+    if str(feature_mode).lower() in ("ee_aggregate", "ee_agg", "equivariant_ee"):
+        names.extend(["ee_density", "ee_vec_x", "ee_vec_y", "ee_vec_z"])
     if len(names) < input_dim:
         names.extend([f"x{i}" for i in range(len(names), input_dim)])
     return names[:input_dim]
@@ -199,13 +203,18 @@ def _make_features(
     electrons,
     input_dim: int,
     sample_size: int | None,
+    feature_mode: str = "one_body",
 ):
     nelectrons = sum(electrons)
     positions = jnp.reshape(positions, (-1, nelectrons * 3))
 
     def single_position_features(pos):
-        ae, _, r_ae, _ = networks.construct_input_features(pos, atoms, ndim=3)
-        return jnp.concatenate((r_ae, ae), axis=2).reshape(nelectrons, -1)
+        return networks.construct_orbital_features(
+            pos,
+            atoms,
+            ndim=3,
+            feature_mode=feature_mode,
+        )
 
     features = jax.vmap(single_position_features)(positions)
     features = jnp.reshape(features, (-1, input_dim))
@@ -2266,12 +2275,17 @@ def main() -> None:
         tuple(cfg.system.electrons),
         spec["input_dim"],
         sample_size,
+        spec["orbital_feature_mode"],
     )
 
     cache = model.get_act(features)
     attribution = model.attribute(cache)
     feature_score = np.asarray(attribution["feature_score"])
-    feature_names = _feature_names(spec["natoms"], spec["input_dim"])
+    feature_names = _feature_names(
+        spec["natoms"],
+        spec["input_dim"],
+        spec["orbital_feature_mode"],
+    )
     ranking = np.argsort(-feature_score)
 
     summary = {
