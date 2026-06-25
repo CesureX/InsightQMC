@@ -71,12 +71,29 @@ def _array_partitions(sizes):
     return list(np.cumsum(tuple(int(size) for size in sizes)))[:-1]
 
 
+def _merge_static_state_with_template(template_state, checkpoint_state):
+    if checkpoint_state is None:
+        return template_state
+    try:
+        merged = dict(template_state.flat_state())
+        checkpoint_flat = dict(checkpoint_state.flat_state())
+    except AttributeError:
+        return checkpoint_state
+    for path, value in checkpoint_flat.items():
+        if path in merged:
+            merged[path] = value
+    return nnx.State.from_flat_path(merged)
+
+
 def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | None = None):
     molecule = cfg.system.molecule
     electrons = tuple(cfg.system.electrons)
     nelectrons = sum(electrons)
     natoms = len(molecule)
+    ndeterminants = int(cfg.get('ndeterminants', 1))
+    use_determinant_weights = bool(cfg.get('determinant_weights', ndeterminants > 1))
     nfeatures = int(cfg.nfeatures)
+    orbital_feature_mode = str(cfg.get('orbital_features', 'one_body')).lower()
 
     atoms = jnp.array([atom.coords for atom in molecule])
     charges = jnp.array([atom.charge for atom in molecule])
@@ -86,7 +103,11 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     mkan_cfg = cfg.get('mkan', {})
     layer_type = str(mkan_cfg.get('layer_type', 'spline')).lower()
     mkan_input_dim = int(nfeatures if mkan_cfg.get('input_dim', None) is None else mkan_cfg.input_dim)
-    output_default = (2 * nelectrons) if bool(cfg.complex_output) else nelectrons
+    output_default = (
+        (2 * ndeterminants * nelectrons)
+        if bool(cfg.complex_output)
+        else (ndeterminants * nelectrons)
+    )
     mkan_output_dim = int(output_default if mkan_cfg.get('output_dim', None) is None else mkan_cfg.output_dim)
 
     if mkan_cfg.get('width', None) is None:
@@ -145,9 +166,10 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         seed=int(cfg.seed),
     )
     graphdef, _, static_state = nnx.split(model_template, nnx.Param, ...)
-    checkpoint_static_state = checkpoint.get('mkan_static_state') if checkpoint is not None else None
-    if checkpoint_static_state is not None:
-        static_state = checkpoint_static_state
+    static_state = _merge_static_state_with_template(
+        static_state,
+        checkpoint.get('mkan_static_state') if checkpoint is not None else None,
+    )
     jastrow_type = str(cfg.get('jastrow', {}).get('type', 'pade')).lower()
     if jastrow_type == 'pade':
         same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices(electrons)
@@ -164,6 +186,7 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     else:
         raise ValueError(f'Unsupported jastrow.type={jastrow_type!r}.')
     jastrow_uses_r_ae = jastrow_type == 'ferminet_three_body'
+    jastrow_en = bool(cfg.get('jastrow', {}).get('en', False))
     active_spin_channels = networks.active_spin_channels(electrons)
     full_det = bool(cfg.get('full_det', True))
 
@@ -174,16 +197,23 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
 
     def orbitals_apply(params, pos, spins_, atoms_, charges_):
         del spins_, charges_
-        ae, _, r_ae, _ = networks.construct_input_features(pos, atoms_, ndim=3)
-        h_one = jnp.concatenate((r_ae, ae), axis=2).reshape(nelectrons, -1)
+        ae, ee, r_ae, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
+        h_one = networks.orbital_features_from_components(
+            ae,
+            ee,
+            r_ae,
+            r_ee,
+            feature_mode=orbital_feature_mode,
+        )
         orbital_values = apply_mkan(params, h_one)
         if bool(cfg.complex_output):
+            real_channel_count = 2 * ndeterminants * nelectrons
             orbital_values = (
-                orbital_values[..., 0:2 * nelectrons:2]
-                + 1.0j * orbital_values[..., 1:2 * nelectrons:2]
+                orbital_values[..., 0:real_channel_count:2]
+                + 1.0j * orbital_values[..., 1:real_channel_count:2]
             )
         else:
-            orbital_values = orbital_values[..., :nelectrons]
+            orbital_values = orbital_values[..., : ndeterminants * nelectrons]
 
         spin_partitions = _array_partitions(electrons)
         orbital_row_channels = jnp.split(orbital_values, spin_partitions, axis=0)
@@ -192,12 +222,13 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 channel for channel, spin in zip(orbital_row_channels, electrons) if spin > 0
             ]
         else:
+            starts = np.cumsum((0, *[ndeterminants * int(spin) for spin in electrons[:-1]]))
             orbital_channels = [
-                channel[:, start : start + spin]
+                channel[:, start : start + ndeterminants * spin]
                 for channel, spin, start in zip(
                     orbital_row_channels,
                     electrons,
-                    (0, int(electrons[0])),
+                    starts,
                 )
                 if spin > 0
             ]
@@ -235,23 +266,32 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
 
     def signed_network(params, pos, spins_, atoms_, charges_):
         determinant = orbitals_apply(params, pos, spins_, atoms_, charges_)
-        phase, logmag = networks.logdet_matmul(determinant)
-        if bool(cfg.get('jastrow', {}).get('ee', True)):
+        det_weights = None
+        if use_determinant_weights and isinstance(params, dict):
+            det_weights = params.get('det_weights', None)
+        phase, logmag = networks.logdet_matmul(determinant, det_weights)
+        if bool(cfg.get('jastrow', {}).get('ee', True)) or jastrow_en:
             _, _, r_ae, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
-            if jastrow_uses_r_ae:
-                logmag = logmag + apply_jastrow(
-                    r_ee,
+            if bool(cfg.get('jastrow', {}).get('ee', True)):
+                if jastrow_uses_r_ae:
+                    logmag = logmag + apply_jastrow(
+                        r_ee,
+                        r_ae,
+                        params['jastrow_ee'],
+                        same_spin_pairs,
+                        opposite_spin_pairs,
+                    )
+                else:
+                    logmag = logmag + apply_jastrow(
+                        r_ee,
+                        params['jastrow_ee'],
+                        same_spin_pairs,
+                        opposite_spin_pairs,
+                    )
+            if jastrow_en:
+                logmag = logmag + jastrow.apply_one_body_en_jastrow(
                     r_ae,
-                    params['jastrow_ee'],
-                    same_spin_pairs,
-                    opposite_spin_pairs,
-                )
-            else:
-                logmag = logmag + apply_jastrow(
-                    r_ee,
-                    params['jastrow_ee'],
-                    same_spin_pairs,
-                    opposite_spin_pairs,
+                    params['jastrow_en'],
                 )
         return phase, logmag
 

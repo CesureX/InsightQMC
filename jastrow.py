@@ -65,24 +65,33 @@ def init_ferminet_ee_jastrow() -> dict[str, Array]:
     }
 
 
-def init_ferminet_plus_ee_jastrow() -> dict[str, Array]:
+def init_ferminet_plus_ee_jastrow(radial_order: int = 4) -> dict[str, Array]:
     """Initialize FermiNet cusp Jastrow with extra radial correction terms."""
 
+    radial_order = int(radial_order)
     return {
         "ee_par": jnp.ones((1,)),
         "ee_anti": jnp.ones((1,)),
-        "ee_par_coeff": jnp.zeros((4,)),
-        "ee_anti_coeff": jnp.zeros((4,)),
+        "ee_par_coeff": jnp.zeros((radial_order,)),
+        "ee_anti_coeff": jnp.zeros((radial_order,)),
     }
 
 
-def init_ferminet_three_body_jastrow() -> dict[str, Array]:
+def init_ferminet_three_body_jastrow(radial_order: int = 4) -> dict[str, Array]:
     """Initialize pair-cusp Jastrow plus electron-electron-nucleus terms."""
 
-    params = init_ferminet_plus_ee_jastrow()
+    params = init_ferminet_plus_ee_jastrow(radial_order=radial_order)
     params["een_par_coeff"] = jnp.zeros((4,))
     params["een_anti_coeff"] = jnp.zeros((4,))
     return params
+
+
+def init_one_body_en_jastrow(natom: int, radial_order: int = 4) -> dict[str, Array]:
+    """Initialize a bounded electron-nucleus one-body Jastrow correction."""
+
+    return {
+        "en_coeff": jnp.zeros((int(natom), int(radial_order))),
+    }
 
 
 def _pair_distances(r_ee: Array, pair_indices: Array) -> Array:
@@ -135,6 +144,18 @@ def _three_body_correction(
         axis=-1,
     )
     return jnp.sum(features * coeff, axis=-1)
+
+
+def apply_one_body_en_jastrow(
+    r_ae: Array,
+    params: Mapping[str, Array],
+) -> Array:
+    """Evaluate a bounded trainable electron-nucleus Jastrow correction."""
+
+    coeff = params["en_coeff"]
+    x = r_ae[..., 0] / (1.0 + r_ae[..., 0])
+    powers = x[..., None] ** jnp.arange(1, coeff.shape[-1] + 1)
+    return jnp.sum(powers * coeff[None, ...])
 
 
 def _sum_pair_cusps(

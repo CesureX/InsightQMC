@@ -1144,6 +1144,13 @@ class MultKAN(nnx.Module):
         os.makedirs(folder, exist_ok=True)
         figures = []
 
+        def input_label(layer_idx: int, in_idx: int) -> str:
+            if layer_idx == 0 and in_vars is not None and in_idx < len(in_vars):
+                return str(in_vars[in_idx])
+            if layer_idx == 0:
+                return f"x{in_idx}"
+            return f"h{in_idx}"
+
         for layer_idx in range(self.depth):
             n_in = self.width_in[layer_idx]
             n_out = self.width_out[layer_idx + 1]
@@ -1167,8 +1174,7 @@ class MultKAN(nnx.Module):
                     ax.set_yticks([])
 
                     if out_idx == n_out - 1:
-                        label = in_vars[in_idx] if in_vars is not None and in_idx < len(in_vars) else f"x{in_idx}"
-                        ax.set_xlabel(label, fontsize=8)
+                        ax.set_xlabel(input_label(layer_idx, in_idx), fontsize=8)
                     if in_idx == 0:
                         ax.set_ylabel(f"y{out_idx}", fontsize=8)
 

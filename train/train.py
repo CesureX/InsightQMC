@@ -1,3 +1,5 @@
+import pickle
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import flax
@@ -49,6 +51,20 @@ def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
 
 def _array_partitions(sizes):
     return list(np.cumsum(tuple(int(size) for size in sizes)))[:-1]
+
+
+def _merge_static_state_with_template(template_state, checkpoint_state):
+    if checkpoint_state is None:
+        return template_state
+    try:
+        merged = dict(template_state.flat_state())
+        checkpoint_flat = dict(checkpoint_state.flat_state())
+    except AttributeError:
+        return checkpoint_state
+    for path, value in checkpoint_flat.items():
+        if path in merged:
+            merged[path] = value
+    return nnx.State.from_flat_path(merged)
 
 
 def _construct_input_features(pos: jnp.ndarray, atoms: jnp.ndarray, ndim: int = 3):
@@ -118,6 +134,7 @@ class VMCTrainer:
         self.k = jnp.array(cfg.k)
         self.layer_dims = jnp.array(cfg.layer_dims)
         self.grid_range = cfg.grid_range
+        self.orbital_feature_mode = str(cfg.get('orbital_features', 'one_body')).lower()
 
         self.seed = int(cfg.seed)
         self.seed_electrons_coords = int(cfg.seed_electrons_coords)
@@ -142,6 +159,10 @@ class VMCTrainer:
         self.use_scan = bool(cfg.use_scan)
         self.complex_output = bool(cfg.complex_output)
         self.full_det = bool(cfg.get('full_det', True))
+        self.ndeterminants = int(cfg.get('ndeterminants', 1))
+        if self.ndeterminants <= 0:
+            raise ValueError('ndeterminants must be positive.')
+        self.use_determinant_weights = bool(cfg.get('determinant_weights', self.ndeterminants > 1))
         self.laplacian_method = cfg.laplacian_method
         self.scf_fraction = float(cfg.scf_fraction)
         self.t_init = int(cfg.t_init)
@@ -149,6 +170,9 @@ class VMCTrainer:
 
         self.learning_rate = float(cfg.learning_rate)
         self.learning_rate_decay = float(cfg.learning_rate_decay)
+        self.gradient_clip_norm = float(cfg.get('gradient_clip_norm', 0.0))
+        self.reset_optimizer_on_resume = bool(cfg.get('reset_optimizer_on_resume', False))
+        self.resize_resumed_noise = float(cfg.get('resize_resumed_noise', 0.0))
         self.preiterations = int(cfg.preiterations)
         self.run_pretrain = bool(cfg.run_pretrain)
         self.iterations = int(cfg.iterations)
@@ -160,7 +184,10 @@ class VMCTrainer:
         self.envelope_degree = int(cfg.get('envelope_degree', 5))
         jastrow_cfg = cfg.get('jastrow', {})
         self.jastrow_ee = bool(jastrow_cfg.get('ee', True))
+        self.jastrow_en = bool(jastrow_cfg.get('en', False))
+        self.jastrow_en_order = int(jastrow_cfg.get('en_radial_order', 4))
         self.jastrow_type = str(jastrow_cfg.get('type', 'pade')).lower()
+        self.jastrow_radial_order = int(jastrow_cfg.get('radial_order', 4))
 
         mkan_cfg = cfg.get('mkan', {})
         self.mkan_layer_type = str(mkan_cfg.get('layer_type', 'spline')).lower()
@@ -168,14 +195,23 @@ class VMCTrainer:
         self.mkan_width = mkan_cfg.get('width', None)
         self.mkan_required_parameters = mkan_cfg.get('required_parameters', None)
         self.mkan_pretrain_phase_weight = float(mkan_cfg.get('pretrain_phase_weight', 1.0e-2))
+        self.mkan_prune_mask_checkpoint = mkan_cfg.get('prune_mask_checkpoint', None)
         mkan_input_dim = mkan_cfg.get('input_dim', None)
         mkan_output_dim = mkan_cfg.get('output_dim', None)
         self.mkan_input_dim = int(nfeatures if mkan_input_dim is None else mkan_input_dim)
         self.mkan_output_dim = int(
-            ((2 * self.nelectrons) if self.complex_output else self.nelectrons)
+            (
+                (2 * self.ndeterminants * self.nelectrons)
+                if self.complex_output
+                else (self.ndeterminants * self.nelectrons)
+            )
             if mkan_output_dim is None else mkan_output_dim
         )
-        min_output_dim = (2 * self.nelectrons) if self.complex_output else self.nelectrons
+        min_output_dim = (
+            (2 * self.ndeterminants * self.nelectrons)
+            if self.complex_output
+            else (self.ndeterminants * self.nelectrons)
+        )
         if self.mkan_output_dim < min_output_dim:
             raise ValueError(
                 f'mkan.output_dim must be at least {min_output_dim} for '
@@ -232,9 +268,22 @@ class VMCTrainer:
         self._mkan_graphdef, initial_params, self._mkan_static_state = nnx.split(
             model_template, nnx.Param, ...
         )
+        if self.mkan_prune_mask_checkpoint:
+            mask_checkpoint_path = Path(str(self.mkan_prune_mask_checkpoint)).expanduser()
+            with mask_checkpoint_path.open('rb') as handle:
+                mask_checkpoint = pickle.load(handle)
+            mask_static_state = mask_checkpoint.get('mkan_static_state')
+            if mask_static_state is None:
+                raise ValueError(
+                    f'No mkan_static_state found in prune mask checkpoint: {mask_checkpoint_path}'
+                )
+            self._mkan_static_state = _merge_static_state_with_template(
+                self._mkan_static_state,
+                mask_static_state,
+            )
         active_spin_channels = networks.active_spin_channels(self.electrons)
         envelope_output_dims = [
-            self.nelectrons if self.full_det else spin
+            self.ndeterminants * (self.nelectrons if self.full_det else spin)
             for spin in active_spin_channels
         ]
         envelope_params = None
@@ -261,24 +310,37 @@ class VMCTrainer:
             apply_jastrow = jastrow.apply_ferminet_ee_jastrow
         elif self.jastrow_type == 'ferminet_plus':
             same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(self.electrons)
-            init_jastrow = jastrow.init_ferminet_plus_ee_jastrow
+            init_jastrow = lambda: jastrow.init_ferminet_plus_ee_jastrow(
+                radial_order=self.jastrow_radial_order
+            )
             apply_jastrow = jastrow.apply_ferminet_plus_ee_jastrow
         elif self.jastrow_type == 'ferminet_three_body':
             same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices_or_empty(self.electrons)
-            init_jastrow = jastrow.init_ferminet_three_body_jastrow
+            init_jastrow = lambda: jastrow.init_ferminet_three_body_jastrow(
+                radial_order=self.jastrow_radial_order
+            )
             apply_jastrow = jastrow.apply_ferminet_three_body_jastrow
         else:
             raise ValueError(f'Unsupported jastrow.type={self.jastrow_type!r}.')
         jastrow_uses_r_ae = self.jastrow_type == 'ferminet_three_body'
         jastrow_params = init_jastrow() if self.jastrow_ee else None
+        jastrow_en_params = (
+            jastrow.init_one_body_en_jastrow(self.natoms, self.jastrow_en_order)
+            if self.jastrow_en
+            else None
+        )
 
         def kan_init(key):
             del key
             params = {'mkan': initial_params}
+            if self.use_determinant_weights and self.ndeterminants > 1:
+                params['det_weights'] = jnp.ones((self.ndeterminants, 1)) / self.ndeterminants
             if envelope_params is not None:
                 params['envelope'] = envelope_params
             if jastrow_params is not None:
                 params['jastrow_ee'] = jastrow_params
+            if jastrow_en_params is not None:
+                params['jastrow_en'] = jastrow_en_params
             return params
 
         def apply_mkan(params, features):
@@ -294,16 +356,23 @@ class VMCTrainer:
 
         def orbitals_apply(params, pos, spins, atoms, charges):
             del spins, charges
-            ae, _, r_ae, _ = _construct_input_features(pos, atoms, ndim=3)
-            h_one = jnp.concatenate((r_ae, ae), axis=2).reshape(self.nelectrons, -1)
+            ae, ee, r_ae, r_ee = _construct_input_features(pos, atoms, ndim=3)
+            h_one = networks.orbital_features_from_components(
+                ae,
+                ee,
+                r_ae,
+                r_ee,
+                feature_mode=self.orbital_feature_mode,
+            )
             orbital_values = apply_mkan(params, h_one)
             if self.complex_output:
+                real_channel_count = 2 * self.ndeterminants * self.nelectrons
                 orbital_values = (
-                    orbital_values[..., 0:2 * self.nelectrons:2]
-                    + 1.0j * orbital_values[..., 1:2 * self.nelectrons:2]
+                    orbital_values[..., 0:real_channel_count:2]
+                    + 1.0j * orbital_values[..., 1:real_channel_count:2]
                 )
             else:
-                orbital_values = orbital_values[..., :self.nelectrons]
+                orbital_values = orbital_values[..., : self.ndeterminants * self.nelectrons]
 
             spin_partitions = _array_partitions(self.electrons)
             orbital_row_channels = jnp.split(orbital_values, spin_partitions, axis=0)
@@ -315,12 +384,13 @@ class VMCTrainer:
                     if spin > 0
                 ]
             else:
+                starts = np.cumsum((0, *[self.ndeterminants * int(spin) for spin in self.electrons[:-1]]))
                 orbital_channels = [
-                    channel[:, start : start + spin]
+                    channel[:, start : start + self.ndeterminants * spin]
                     for channel, spin, start in zip(
                         orbital_row_channels,
                         self.electrons,
-                        (0, int(self.electrons[0])),
+                        starts,
                     )
                     if spin > 0
                 ]
@@ -360,25 +430,36 @@ class VMCTrainer:
 
         def signed_network(params, pos, spins, atoms, charges):
             determinant = orbitals_apply(params, pos, spins, atoms, charges)
-            phase, logmag = networks.logdet_matmul(determinant)
-            if self.jastrow_ee:
-                if not (isinstance(params, dict) and 'jastrow_ee' in params):
-                    raise ValueError('Missing Jastrow parameters for electron-electron Jastrow.')
+            det_weights = None
+            if self.use_determinant_weights and isinstance(params, dict):
+                det_weights = params.get('det_weights', None)
+            phase, logmag = networks.logdet_matmul(determinant, det_weights)
+            if self.jastrow_ee or self.jastrow_en:
                 _, _, r_ae, r_ee = _construct_input_features(pos, atoms, ndim=3)
-                if jastrow_uses_r_ae:
-                    logmag = logmag + apply_jastrow(
-                        r_ee,
+                if self.jastrow_ee:
+                    if not (isinstance(params, dict) and 'jastrow_ee' in params):
+                        raise ValueError('Missing Jastrow parameters for electron-electron Jastrow.')
+                    if jastrow_uses_r_ae:
+                        logmag = logmag + apply_jastrow(
+                            r_ee,
+                            r_ae,
+                            params['jastrow_ee'],
+                            same_spin_pairs,
+                            opposite_spin_pairs,
+                        )
+                    else:
+                        logmag = logmag + apply_jastrow(
+                            r_ee,
+                            params['jastrow_ee'],
+                            same_spin_pairs,
+                            opposite_spin_pairs,
+                        )
+                if self.jastrow_en:
+                    if not (isinstance(params, dict) and 'jastrow_en' in params):
+                        raise ValueError('Missing Jastrow parameters for electron-nucleus Jastrow.')
+                    logmag = logmag + jastrow.apply_one_body_en_jastrow(
                         r_ae,
-                        params['jastrow_ee'],
-                        same_spin_pairs,
-                        opposite_spin_pairs,
-                    )
-                else:
-                    logmag = logmag + apply_jastrow(
-                        r_ee,
-                        params['jastrow_ee'],
-                        same_spin_pairs,
-                        opposite_spin_pairs,
+                        params['jastrow_en'],
                     )
             return phase, logmag
 
@@ -423,8 +504,12 @@ class VMCTrainer:
         positions = jnp.reshape(data.positions, (-1, self.nelectrons * 3))
 
         def single_position_features(pos):
-            ae, _, r_ae, _ = _construct_input_features(pos, data.atoms, ndim=3)
-            return jnp.concatenate((r_ae, ae), axis=2).reshape(self.nelectrons, -1)
+            return networks.construct_orbital_features(
+                pos,
+                data.atoms,
+                ndim=3,
+                feature_mode=self.orbital_feature_mode,
+            )
 
         samples = jax.vmap(single_position_features)(positions)
         samples = jnp.reshape(samples, (-1, self.mkan_input_dim))
@@ -495,6 +580,7 @@ class VMCTrainer:
         key = jax.random.PRNGKey(self.seed)
         key, subkey = jax.random.split(key)
         params = kan_init(subkey)
+        target_params = params
         sharded_key = key
 
         pretrain_start_step = 0
@@ -502,20 +588,33 @@ class VMCTrainer:
         pretrain_opt_state = None
         train_opt_state = None
         data = None
+        params_changed_on_resume = False
 
         if resume_state is not None:
             params = resume_state['params']
+            params, params_changed_on_resume = self._prepare_resumed_params(
+                params,
+                target_params=target_params,
+            )
             data = resume_state['data']
+            data = self._resize_resumed_data(data)
             sharded_key = resume_state['key']
             if resume_state.get('mkan_static_state') is not None:
-                self._mkan_static_state = resume_state['mkan_static_state']
+                self._mkan_static_state = _merge_static_state_with_template(
+                    self._mkan_static_state,
+                    resume_state['mkan_static_state'],
+                )
             stage = resume_state.get('stage')
             if stage == 'pretrain':
                 pretrain_start_step = int(resume_state.get('step', 0))
                 pretrain_opt_state = resume_state.get('pretrain_opt_state')
+                if self.reset_optimizer_on_resume or params_changed_on_resume:
+                    pretrain_opt_state = None
             elif stage == 'train':
                 train_start_step = int(resume_state.get('step', self.t_init))
                 train_opt_state = resume_state.get('train_opt_state')
+                if self.reset_optimizer_on_resume or params_changed_on_resume:
+                    train_opt_state = None
 
         if data is None:
             key_electrons_coords = jax.random.PRNGKey(self.seed_electrons_coords)
@@ -532,15 +631,348 @@ class VMCTrainer:
 
         return params, data, sharded_key, pretrain_start_step, train_start_step, pretrain_opt_state, train_opt_state
 
+    def _prepare_resumed_params(self, params, target_params=None):
+        if not isinstance(params, dict):
+            return params, False
+
+        changed = False
+        new_params = dict(params)
+        if target_params is not None and isinstance(target_params, dict):
+            new_params, did_prepare = self._prepare_resumed_mkan(new_params, target_params)
+            changed = changed or did_prepare
+
+        if self.use_determinant_weights and self.ndeterminants > 1:
+            new_params, did_prepare = self._prepare_resumed_det_weights(new_params)
+            changed = changed or did_prepare
+
+        if self.envelope_on:
+            new_params, did_prepare = self._prepare_resumed_envelope(new_params)
+            changed = changed or did_prepare
+
+        if self.jastrow_type in ('ferminet_plus', 'ferminet_three_body'):
+            if 'jastrow_ee' in new_params:
+                jastrow_params = dict(new_params['jastrow_ee'])
+                jastrow_changed = False
+                for name in ('ee_par_coeff', 'ee_anti_coeff'):
+                    if name not in jastrow_params:
+                        continue
+                    resized, did_resize = self._resize_1d_param(
+                        jastrow_params[name],
+                        self.jastrow_radial_order,
+                    )
+                    jastrow_params[name] = resized
+                    jastrow_changed = jastrow_changed or did_resize
+
+                if jastrow_changed:
+                    new_params['jastrow_ee'] = jastrow_params
+                    changed = True
+
+        if self.jastrow_en:
+            target = jastrow.init_one_body_en_jastrow(self.natoms, self.jastrow_en_order)
+            if 'jastrow_en' not in new_params:
+                new_params['jastrow_en'] = target
+                changed = True
+            else:
+                en_params = dict(new_params['jastrow_en'])
+                if 'en_coeff' not in en_params:
+                    en_params['en_coeff'] = target['en_coeff']
+                    changed = True
+                else:
+                    resized, did_resize = self._resize_2d_param(
+                        en_params['en_coeff'],
+                        target['en_coeff'].shape,
+                    )
+                    en_params['en_coeff'] = resized
+                    changed = changed or did_resize
+                new_params['jastrow_en'] = en_params
+        return new_params, changed
+
+    def _prepare_resumed_mkan(self, params, target_params):
+        if 'mkan' not in params or 'mkan' not in target_params:
+            return params, False
+        try:
+            source_output_dim = self._mkan_state_output_dim(params['mkan'])
+            target_output_dim = self._mkan_state_output_dim(target_params['mkan'])
+        except (KeyError, TypeError, ValueError):
+            return params, False
+        if source_output_dim == target_output_dim:
+            return params, False
+
+        new_params = dict(params)
+        target_mkan = target_params['mkan']
+        self._copy_mkan_state_overlap(
+            params['mkan'],
+            target_mkan,
+            source_output_dim,
+            target_output_dim,
+        )
+        new_params['mkan'] = target_mkan
+        return new_params, True
+
+    @staticmethod
+    def _mkan_state_output_dim(state):
+        layers = state['layers']
+        final_key = sorted(layers.keys())[-1]
+        return int(layers[final_key]['bias'].value.shape[0])
+
+    def _copy_mkan_state_overlap(self, source, target, source_output_dim, target_output_dim):
+        layers = target['layers']
+        final_key = sorted(layers.keys())[-1]
+        for key in source['layers'].keys():
+            if key in target['layers'] and key != final_key:
+                self._copy_state_overlap(source['layers'][key], target['layers'][key])
+
+        output_map = self._output_real_channel_map(source_output_dim, target_output_dim)
+        self._remap_final_mkan_layer(
+            source['layers'][final_key],
+            target['layers'][final_key],
+            output_map,
+            source_output_dim,
+            target_output_dim,
+        )
+        for name in ('node_bias', 'node_scale', 'subnode_bias', 'subnode_scale'):
+            if name not in source or name not in target:
+                continue
+            for key in source[name].keys():
+                if key not in target[name]:
+                    continue
+                if key == final_key:
+                    self._remap_output_vector(source[name][key], target[name][key], output_map)
+                else:
+                    self._copy_state_overlap(source[name][key], target[name][key])
+
+    def _output_real_channel_map(self, source_output_dim: int, target_output_dim: int):
+        if not self.complex_output:
+            source_ndet = source_output_dim // self.nelectrons
+            target_ndet = target_output_dim // self.nelectrons
+            factor = 1
+        else:
+            source_ndet = source_output_dim // (2 * self.nelectrons)
+            target_ndet = target_output_dim // (2 * self.nelectrons)
+            factor = 2
+        ndet_common = min(source_ndet, target_ndet)
+        pairs = []
+        source_spin_offset = source_ndet * self.electrons[0]
+        target_spin_offset = target_ndet * self.electrons[0]
+        for det in range(ndet_common):
+            for orbital in range(self.electrons[0]):
+                source_channel = det * self.electrons[0] + orbital
+                target_channel = det * self.electrons[0] + orbital
+                for part in range(factor):
+                    pairs.append((factor * source_channel + part, factor * target_channel + part))
+            for orbital in range(self.electrons[1]):
+                source_channel = source_spin_offset + det * self.electrons[1] + orbital
+                target_channel = target_spin_offset + det * self.electrons[1] + orbital
+                for part in range(factor):
+                    pairs.append((factor * source_channel + part, factor * target_channel + part))
+        return pairs
+
+    def _remap_final_mkan_layer(
+        self,
+        source_layer,
+        target_layer,
+        output_map,
+        source_output_dim,
+        target_output_dim,
+    ):
+        for name in ('bias', 'c_res', 'c_spl'):
+            if name in source_layer and name in target_layer:
+                self._remap_output_vector(source_layer[name], target_layer[name], output_map)
+        if 'c_basis' not in source_layer or 'c_basis' not in target_layer:
+            return
+        source_value = source_layer['c_basis'].value
+        target_value = target_layer['c_basis'].value
+        source_basis = source_value.reshape(source_output_dim, -1, source_value.shape[-1])
+        target_basis = target_value.reshape(target_output_dim, -1, target_value.shape[-1])
+        hidden = min(int(source_basis.shape[1]), int(target_basis.shape[1]))
+        basis = min(int(source_basis.shape[2]), int(target_basis.shape[2]))
+        for source_index, target_index in output_map:
+            target_basis = target_basis.at[target_index, :hidden, :basis].set(
+                source_basis[source_index, :hidden, :basis]
+            )
+        target_layer['c_basis'].value = target_basis.reshape(target_value.shape)
+
+    def _remap_output_vector(self, source_param, target_param, output_map):
+        source_value = source_param.value
+        target_value = target_param.value
+        if source_value.ndim == 0 or target_value.ndim == 0:
+            return
+        updated = jnp.asarray(target_value)
+        trailing = tuple(
+            slice(0, min(int(source_value.shape[axis]), int(target_value.shape[axis])))
+            for axis in range(1, source_value.ndim)
+        )
+        for source_index, target_index in output_map:
+            updated = updated.at[(target_index, *trailing)].set(
+                source_value[(source_index, *trailing)]
+            )
+        target_param.value = updated
+
+    def _prepare_resumed_det_weights(self, params):
+        target_shape = (self.ndeterminants, 1)
+        if 'det_weights' not in params:
+            new_params = dict(params)
+            new_params['det_weights'] = jnp.ones(target_shape) / self.ndeterminants
+            return new_params, True
+
+        value = jnp.asarray(params['det_weights'])
+        if tuple(value.shape) == target_shape:
+            return params, False
+        resized = jnp.zeros(target_shape, dtype=value.dtype)
+        rows = min(int(value.shape[0]), target_shape[0])
+        cols = min(int(value.shape[1]), target_shape[1])
+        resized = resized.at[:rows, :cols].set(value[:rows, :cols])
+        new_params = dict(params)
+        new_params['det_weights'] = resized
+        return new_params, True
+
+    def _target_envelope_params(self):
+        active_spin_channels = networks.active_spin_channels(self.electrons)
+        output_dims = [
+            self.ndeterminants * (self.nelectrons if self.full_det else spin)
+            for spin in active_spin_channels
+        ]
+        if self.envelope_type == 'isotropic':
+            return envelope.init_isotropic_envelope(self.natoms, output_dims)
+        if self.envelope_type == 'chebyshev':
+            return envelope.init_chebyshev_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+            )
+        return None
+
+    def _prepare_resumed_envelope(self, params):
+        target = self._target_envelope_params()
+        if target is None:
+            return params, False
+        if 'envelope' not in params:
+            new_params = dict(params)
+            new_params['envelope'] = target
+            return new_params, True
+
+        changed = False
+        current = list(params['envelope'])
+        resized_envelope = []
+        for index, target_channel in enumerate(target):
+            if index >= len(current):
+                resized_envelope.append(target_channel)
+                changed = True
+                continue
+            current_channel = dict(current[index])
+            resized_channel = {}
+            for name, target_value in target_channel.items():
+                if name not in current_channel:
+                    resized_channel[name] = target_value
+                    changed = True
+                    continue
+                resized, did_resize = self._resize_param_like(current_channel[name], target_value)
+                resized_channel[name] = resized
+                changed = changed or did_resize
+            resized_envelope.append(resized_channel)
+
+        if len(current) != len(target):
+            changed = True
+        if not changed:
+            return params, False
+        new_params = dict(params)
+        new_params['envelope'] = resized_envelope
+        return new_params, True
+
+    @staticmethod
+    def _resize_1d_param(value, target_size: int):
+        value = jnp.asarray(value)
+        current_size = int(value.shape[0])
+        target_size = int(target_size)
+        if current_size == target_size:
+            return value, False
+        if current_size > target_size:
+            return value[:target_size], True
+        padding = jnp.zeros((target_size - current_size,), dtype=value.dtype)
+        return jnp.concatenate((value, padding), axis=0), True
+
+    @staticmethod
+    def _resize_2d_param(value, target_shape):
+        value = jnp.asarray(value)
+        target_shape = tuple(int(v) for v in target_shape)
+        if tuple(value.shape) == target_shape:
+            return value, False
+        resized = jnp.zeros(target_shape, dtype=value.dtype)
+        rows = min(int(value.shape[0]), target_shape[0])
+        cols = min(int(value.shape[1]), target_shape[1])
+        resized = resized.at[:rows, :cols].set(value[:rows, :cols])
+        return resized, True
+
+    @staticmethod
+    def _resize_param_like(value, template):
+        value = jnp.asarray(value)
+        template = jnp.asarray(template)
+        if tuple(value.shape) == tuple(template.shape):
+            return value, False
+        if value.ndim != template.ndim:
+            return template, True
+        resized = jnp.asarray(template, dtype=value.dtype)
+        common = tuple(slice(0, min(int(a), int(b))) for a, b in zip(value.shape, template.shape))
+        resized = resized.at[common].set(value[common])
+        return resized, True
+
+    def _copy_state_overlap(self, source, target):
+        if hasattr(source, 'value') and hasattr(target, 'value'):
+            source_value = source.value
+            target_value = target.value
+            if hasattr(source_value, 'shape') and hasattr(target_value, 'shape'):
+                resized, _ = self._resize_param_like(source_value, target_value)
+                target.value = resized
+            return
+        if not (hasattr(source, 'keys') and hasattr(target, 'keys')):
+            return
+        for key in source.keys():
+            if key in target:
+                self._copy_state_overlap(source[key], target[key])
+
+    def _resize_resumed_data(self, data: networks.KANetsData) -> networks.KANetsData:
+        positions = data.positions
+        current_batch = int(positions.shape[0])
+        if current_batch == self.batch_size:
+            return data
+        if current_batch > self.batch_size:
+            positions = positions[: self.batch_size]
+        else:
+            repeats = int(np.ceil(self.batch_size / current_batch))
+            positions = jnp.tile(positions, (repeats, 1))[: self.batch_size]
+            if self.resize_resumed_noise > 0.0:
+                key = jax.random.PRNGKey(
+                    self.seed_electrons_coords + 9973 * self.batch_size + current_batch
+                )
+                noise = (
+                    jax.random.normal(key, positions.shape, dtype=positions.dtype)
+                    * self.resize_resumed_noise
+                )
+                keep_original = jnp.arange(self.batch_size) < current_batch
+                noise = noise * (~keep_original)[:, None]
+                positions = positions + noise
+        return networks.KANetsData(
+            positions=positions,
+            spins=data.spins,
+            atoms=data.atoms,
+            charges=data.charges,
+        )
+
     def _build_optimizer(self):
         def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
             return self.learning_rate / (1.0 + t_ / self.learning_rate_decay)
 
-        return optax.chain(
-            optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-6),
-            optax.scale_by_schedule(learning_rate_schedule),
-            optax.scale(-1.0),
+        transforms = []
+        if self.gradient_clip_norm > 0.0:
+            transforms.append(optax.clip_by_global_norm(self.gradient_clip_norm))
+        transforms.extend(
+            (
+                optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-6),
+                optax.scale_by_schedule(learning_rate_schedule),
+                optax.scale(-1.0),
+            )
         )
+        return optax.chain(*transforms)
 
     def _build_train_step(self, signed_network: Callable, logabs_network: Callable, log_network: Callable):
         loss_network = log_network if self.complex_output else logabs_network
@@ -633,15 +1065,19 @@ class VMCTrainer:
             pmove_mean = jnp.mean(pmove)
             t_since_update = t % self.adapt_frequency
             runtime.pmoves[t_since_update] = _to_scalar(pmove_mean)
-            if t > 0 and t_since_update == 0:
-                mean_pmove = float(np.mean(runtime.pmoves))
+            valid_pmoves = runtime.pmoves[~np.isnan(runtime.pmoves)]
+            if (
+                t > 0
+                and t_since_update == 0
+                and valid_pmoves.size == self.adapt_frequency
+            ):
+                mean_pmove = float(np.mean(valid_pmoves))
                 if mean_pmove > self.pmove_max:
                     runtime = runtime.replace(mcmc_width=runtime.mcmc_width * self.width_scale)
                 elif mean_pmove < self.pmove_min:
                     runtime = runtime.replace(mcmc_width=runtime.mcmc_width / self.width_scale)
 
-            window_size = min(t + 1, self.adapt_frequency)
-            pmove_window_mean = float(np.mean(runtime.pmoves[:window_size]))
+            pmove_window_mean = float(np.mean(valid_pmoves)) if valid_pmoves.size else _to_scalar(pmove_mean)
             step_id = t + 1
             loss_value = float(jnp.real(loss))
             variance_value = float(aux_data.variance)
@@ -721,7 +1157,7 @@ class VMCTrainer:
                 data=data,
                 key=sharded_key,
                 mcmc_width=jnp.asarray(self.mcmc_width),
-                pmoves=np.zeros((self.adapt_frequency,), dtype=np.float32),
+                pmoves=np.full((self.adapt_frequency,), np.nan, dtype=np.float32),
             )
             self._run_train_loop(
                 train_start_step=train_start_step,
