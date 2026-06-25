@@ -10,6 +10,7 @@ used after a run has finished.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import re
@@ -82,6 +83,34 @@ def _event_dir(run_dir: Path) -> Path:
     return tb_dir if tb_dir.exists() else run_dir
 
 
+def _load_csv_scalars(run_dir: Path) -> dict[str, ScalarSeries]:
+    csv_path = run_dir / "logs" / "metrics.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"No TensorBoard event files found under {_event_dir(run_dir)} and no metrics CSV found at {csv_path}"
+        )
+
+    grouped: dict[str, tuple[list[int], list[float], list[float]]] = {}
+    with csv_path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        required = {"timestamp", "stage", "step", "metric", "value"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise ValueError(f"Metrics CSV at {csv_path} must contain columns: {sorted(required)}")
+
+        for row in reader:
+            tag = f"{row['stage']}/{row['metric']}"
+            steps, values, wall_times = grouped.setdefault(tag, ([], [], []))
+            steps.append(int(row["step"]))
+            values.append(float(row["value"]))
+            wall_times.append(float(row["timestamp"]))
+
+    series = {}
+    for tag, (steps, values, wall_times) in grouped.items():
+        s, v, w = _deduplicate_by_step(steps, values, wall_times)
+        series[tag] = ScalarSeries(tag, s, v, w)
+    return series
+
+
 def _deduplicate_by_step(steps: list[int], values: list[float], wall_times: list[float]) -> ScalarSeries:
     # Keep the latest event for duplicated steps, which can happen when resuming
     # into the same log directory.
@@ -95,13 +124,13 @@ def _deduplicate_by_step(steps: list[int], values: list[float], wall_times: list
 
 
 def load_scalars(run_dir: Path) -> dict[str, ScalarSeries]:
-    if event_accumulator is None:
-        raise RuntimeError(f"TensorBoard event reader is unavailable: {_TENSORBOARD_ERROR}")
-
     tb_dir = _event_dir(run_dir)
     event_files = sorted(tb_dir.glob("events.out.tfevents*"))
     if not event_files:
-        raise FileNotFoundError(f"No TensorBoard event files found under {tb_dir}")
+        return _load_csv_scalars(run_dir)
+
+    if event_accumulator is None:
+        raise RuntimeError(f"TensorBoard event reader is unavailable: {_TENSORBOARD_ERROR}")
 
     grouped: dict[str, tuple[list[int], list[float], list[float]]] = {}
     for event_file in event_files:
@@ -302,7 +331,10 @@ def main(argv: Iterable[str] | None = None) -> None:
     with (out_dir / "summary.json").open("w") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
     if not args.no_plots:
-        make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction, training_loss_ylim=training_loss_ylim, tail_loss_ylim=tail_loss_ylim)
+        if plt is None:
+            print(f"Warning: matplotlib is unavailable, skipping plots: {_MATPLOTLIB_ERROR}")
+        else:
+            make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction, training_loss_ylim=training_loss_ylim, tail_loss_ylim=tail_loss_ylim)
     print(f"Loaded {len(series)} scalar tags from {run_dir}")
     print(f"Wrote analysis to {out_dir}")
     print_summary(summary)

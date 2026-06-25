@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="920" viewBox="0 0 1500 920">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#222"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2476c6"/>
+    </marker>
+    <style>
+      .title { font-family: "Droid Sans Fallback", "DejaVu Sans", Arial, sans-serif; font-size: 34px; font-weight: 700; fill: #111; }
+      .subtitle { font-family: "Droid Sans Fallback", "DejaVu Sans", Arial, sans-serif; font-size: 18px; font-weight: 500; fill: #333; }
+      .label { font-family: "Droid Sans Fallback", "DejaVu Sans", Arial, sans-serif; font-size: 17px; font-weight: 500; fill: #222; }
+      .small { font-family: "Droid Sans Fallback", "DejaVu Sans", Arial, sans-serif; font-size: 14px; font-weight: 500; fill: #333; }
+      .math { font-family: "DejaVu Serif", "Times New Roman", serif; font-size: 19px; font-weight: 600; fill: #111; }
+      .tiny { font-family: "Droid Sans Fallback", "DejaVu Sans", Arial, sans-serif; font-size: 12px; font-weight: 500; fill: #444; }
+      .box { fill: #fff; stroke: #222; stroke-width: 2; rx: 8; }
+      .soft { fill: #f7f9fc; stroke: #5d6b7a; stroke-width: 1.6; rx: 8; }
+      .blue { fill: #eef6ff; stroke: #2476c6; stroke-width: 2; rx: 8; }
+      .orange { fill: #fff4e8; stroke: #d77a18; stroke-width: 2; rx: 8; }
+      .green { fill: #edf9f0; stroke: #258a3e; stroke-width: 2; rx: 8; }
+      .purple { fill: #f5efff; stroke: #7c48b8; stroke-width: 2; rx: 8; }
+      .line { stroke: #222; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .lineBlue { stroke: #2476c6; stroke-width: 2.2; fill: none; marker-end: url(#arrowBlue); }
+      .thin { stroke: #444; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #777; stroke-width: 1.5; fill: none; stroke-dasharray: 6 5; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1500" height="920" fill="#ffffff"/>
+  <text x="60" y="58" class="title">Li 原子 MKAN 波函数计算框架图</text>
+  <text x="60" y="91" class="subtitle">单行列式示意：layer_dims = [4, 16, 6], complex_output=True, full_det=False, electrons=(2,1)</text>
+
+  <!-- Input electron coordinates -->
+  <rect x="55" y="150" width="310" height="520" class="soft"/>
+  <text x="86" y="185" class="label">输入：3 个电子相对 Li 核的位置</text>
+  <text x="86" y="213" class="small">Li 核位于原点，R = (r₁, r₂, r₃)</text>
+
+  <circle cx="105" cy="285" r="17" fill="#111"/>
+  <circle cx="105" cy="405" r="17" fill="#111"/>
+  <circle cx="105" cy="525" r="17" fill="#111"/>
+  <text x="78" y="257" class="small">e₁ α</text>
+  <text x="78" y="377" class="small">e₂ α</text>
+  <text x="78" y="497" class="small">e₃ β</text>
+
+  <rect x="155" y="250" width="170" height="70" class="box"/>
+  <text x="174" y="279" class="math">h₁ = [r₁,x₁,y₁,z₁]</text>
+  <text x="174" y="304" class="tiny">4 input features</text>
+  <rect x="155" y="370" width="170" height="70" class="box"/>
+  <text x="174" y="399" class="math">h₂ = [r₂,x₂,y₂,z₂]</text>
+  <text x="174" y="424" class="tiny">4 input features</text>
+  <rect x="155" y="490" width="170" height="70" class="box"/>
+  <text x="174" y="519" class="math">h₃ = [r₃,x₃,y₃,z₃]</text>
+  <text x="174" y="544" class="tiny">4 input features</text>
+
+  <line x1="122" y1="285" x2="155" y2="285" class="thin"/>
+  <line x1="122" y1="405" x2="155" y2="405" class="thin"/>
+  <line x1="122" y1="525" x2="155" y2="525" class="thin"/>
+
+  <!-- Shared MKAN -->
+  <rect x="450" y="145" width="410" height="530" class="blue"/>
+  <text x="500" y="184" class="label">共享 MKAN：同一套参数调用 3 次</text>
+  <text x="500" y="213" class="math">[4, 16, 6]</text>
+
+  <rect x="490" y="250" width="90" height="295" fill="#ffffff" stroke="#2476c6" stroke-width="1.8" rx="8"/>
+  <text x="509" y="238" class="small">输入层 4</text>
+  <circle cx="535" cy="290" r="10" fill="#d9ecff" stroke="#2476c6" stroke-width="1.5"/>
+  <circle cx="535" cy="355" r="10" fill="#d9ecff" stroke="#2476c6" stroke-width="1.5"/>
+  <circle cx="535" cy="420" r="10" fill="#d9ecff" stroke="#2476c6" stroke-width="1.5"/>
+  <circle cx="535" cy="485" r="10" fill="#d9ecff" stroke="#2476c6" stroke-width="1.5"/>
+  <text x="524" y="580" class="tiny">r,x,y,z</text>
+
+  <rect x="630" y="210" width="100" height="375" fill="#ffffff" stroke="#2476c6" stroke-width="1.8" rx="8"/>
+  <text x="647" y="198" class="small">KAN 隐层 16</text>
+  <circle cx="680" cy="245" r="8" fill="#111"/>
+  <circle cx="680" cy="285" r="8" fill="#111"/>
+  <circle cx="680" cy="325" r="8" fill="#111"/>
+  <circle cx="680" cy="365" r="8" fill="#111"/>
+  <circle cx="680" cy="405" r="8" fill="#111"/>
+  <circle cx="680" cy="445" r="8" fill="#111"/>
+  <circle cx="680" cy="485" r="8" fill="#111"/>
+  <circle cx="680" cy="525" r="8" fill="#111"/>
+  <text x="650" y="562" class="tiny">16 个 KAN 节点</text>
+
+  <rect x="780" y="250" width="45" height="295" fill="#ffffff" stroke="#2476c6" stroke-width="1.8" rx="8"/>
+  <text x="783" y="238" class="small">输出 6</text>
+  <circle cx="802" cy="280" r="7" fill="#d9ecff" stroke="#2476c6" stroke-width="1.3"/>
+  <circle cx="802" cy="320" r="7" fill="#d9ecff" stroke="#2476c6" stroke-width="1.3"/>
+  <circle cx="802" cy="360" r="7" fill="#d9ecff" stroke="#2476c6" stroke-width="1.3"/>
+  <circle cx="802" cy="400" r="7" fill="#d9ecff" stroke="#2476c6" stroke-width="1.3"/>
+  <circle cx="802" cy="440" r="7" fill="#d9ecff" stroke="#2476c6" stroke-width="1.3"/>
+  <circle cx="802" cy="480" r="7" fill="#d9ecff" stroke="#2476c6" stroke-width="1.3"/>
+
+  <path d="M 580 290 C 610 260, 630 250, 672 245" class="dash"/>
+  <path d="M 580 355 C 610 340, 630 320, 672 325" class="dash"/>
+  <path d="M 580 420 C 610 410, 630 405, 672 405" class="dash"/>
+  <path d="M 580 485 C 610 500, 630 520, 672 525" class="dash"/>
+  <path d="M 688 245 C 730 250, 760 270, 795 280" class="dash"/>
+  <path d="M 688 325 C 730 340, 760 355, 795 360" class="dash"/>
+  <path d="M 688 405 C 730 405, 760 405, 795 400" class="dash"/>
+  <path d="M 688 525 C 730 500, 760 480, 795 480" class="dash"/>
+
+  <text x="500" y="625" class="small">注意：3 个电子不是 3 套网络；它们共享这一套 MKAN 参数。</text>
+
+  <path d="M 325 285 C 380 285, 390 285, 450 285" class="lineBlue"/>
+  <path d="M 325 405 C 380 405, 390 405, 450 405" class="lineBlue"/>
+  <path d="M 325 525 C 380 525, 390 525, 450 525" class="lineBlue"/>
+  <text x="372" y="257" class="tiny">call 1</text>
+  <text x="372" y="380" class="tiny">call 2</text>
+  <text x="372" y="500" class="tiny">call 3</text>
+
+  <!-- Output interpretation -->
+  <rect x="930" y="145" width="480" height="180" class="orange"/>
+  <text x="965" y="184" class="label">每个电子的 6 个实数输出</text>
+  <text x="965" y="218" class="math">yᵢ ∈ R⁶ → 3 个复数 orbital</text>
+  <text x="965" y="255" class="math">[Re ψ₁, Im ψ₁, Re ψ₂, Im ψ₂, Re ψ₃, Im ψ₃]</text>
+  <text x="965" y="292" class="small">对 e₁, e₂, e₃ 分别得到一行 orbital 值</text>
+  <path d="M 825 397 C 870 390, 900 285, 930 250" class="line"/>
+
+  <!-- Spin block determinant -->
+  <rect x="930" y="365" width="480" height="270" class="green"/>
+  <text x="965" y="405" class="label">Li 自旋分块行列式：electrons=(2,1), full_det=False</text>
+
+  <rect x="970" y="435" width="205" height="125" fill="#ffffff" stroke="#258a3e" stroke-width="1.6" rx="8"/>
+  <text x="995" y="464" class="small">alpha block: e₁,e₂</text>
+  <text x="998" y="500" class="math">Mα = [ ψ₁(e₁)  ψ₂(e₁) ]</text>
+  <text x="1045" y="530" class="math">[ ψ₁(e₂)  ψ₂(e₂) ]</text>
+
+  <rect x="1210" y="435" width="160" height="125" fill="#ffffff" stroke="#258a3e" stroke-width="1.6" rx="8"/>
+  <text x="1236" y="464" class="small">beta block: e₃</text>
+  <text x="1247" y="510" class="math">Mβ = [ ψ₃(e₃) ]</text>
+
+  <text x="975" y="602" class="math">D(R) = det(Mα) · det(Mβ)</text>
+  <path d="M 1172 250 C 1160 315, 1160 335, 1160 365" class="line"/>
+
+  <!-- Envelope and Jastrow -->
+  <rect x="930" y="690" width="480" height="150" class="purple"/>
+  <text x="965" y="728" class="label">Envelope 与 Jastrow</text>
+  <text x="965" y="764" class="math">orbital 通道先乘 envelope: E(rᵢ)</text>
+  <text x="965" y="800" class="math">J = J(r₁₂,r₁₃,r₂₃),  exp(J) 乘在 determinant 外面</text>
+  <text x="965" y="828" class="small">Jastrow 使用电子-电子距离，但主要修正幅度。</text>
+  <path d="M 1160 635 C 1160 660, 1160 670, 1160 690" class="line"/>
+
+  <!-- Final formula -->
+  <rect x="165" y="725" width="670" height="115" class="box"/>
+  <text x="198" y="762" class="label">最终波函数</text>
+  <text x="198" y="802" class="math">Ψ(R) = exp(J(r₁₂,r₁₃,r₂₃)) · det(Mα) · det(Mβ)</text>
+  <text x="198" y="828" class="small">其中 MKAN 给出 ψ₁, ψ₂, ψ₃；envelope 已经乘到 orbital 矩阵元素里。</text>
+  <path d="M 930 764 C 885 775, 855 782, 835 782" class="line"/>
+
+  <!-- Note for current 8 feature version -->
+  <rect x="55" y="690" width="310" height="110" fill="#fffbe8" stroke="#d0a400" stroke-width="1.6" rx="8"/>
+  <text x="82" y="722" class="label">如果使用当前 8 维新版本</text>
+  <text x="82" y="752" class="small">输入变为 [r,x,y,z,ee_density,ee_vec]</text>
+  <text x="82" y="779" class="small">网络宽度对应 [8,16,16,24]</text>
+</svg>
