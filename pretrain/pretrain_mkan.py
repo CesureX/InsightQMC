@@ -8,6 +8,8 @@ import jax.numpy as jnp
 import optax
 from tqdm.auto import trange
 
+import constants
+import multi_device
 import networks
 import vmcmc
 
@@ -22,6 +24,7 @@ def make_pretrain_step(
     phase_weight: float = 1.0e-2,
     mcmc_steps: int = 1,
     mcmc_width: float = 0.02,
+    mcmc_jit: bool = True,
 ):
   """Creates one MKAN scalar pretraining step.
 
@@ -59,6 +62,7 @@ def make_pretrain_step(
       ndim=3,
       nelectrons=sum(electrons),
       steps=mcmc_steps,
+      jit=mcmc_jit,
   )
 
   def loss_fn(params, data: networks.KANetsData, scf_approx):
@@ -66,8 +70,8 @@ def make_pretrain_step(
     pred_logabs = batch_network(
         params, data.positions, data.spins, data.atoms, data.charges)
 
-    target_logabs = target_logabs - jnp.mean(target_logabs)
-    pred_logabs = pred_logabs - jnp.mean(pred_logabs)
+    target_logabs = target_logabs - constants.pmean(jnp.mean(target_logabs))
+    pred_logabs = pred_logabs - constants.pmean(jnp.mean(pred_logabs))
     logabs_loss = jnp.mean((pred_logabs - target_logabs) ** 2)
 
     if batch_log_network is None or phase_weight <= 0.0:
@@ -81,6 +85,8 @@ def make_pretrain_step(
   def pretrain_step(data, params, state, key, scf_approx):
     val_and_grad = jax.value_and_grad(loss_fn, argnums=0)
     loss_val, grads = val_and_grad(params, data, scf_approx)
+    loss_val = constants.pmean(loss_val)
+    grads = constants.pmean(grads)
     updates, state = optimizer_update(grads, state, params)
     params = optax.apply_updates(params, updates)
     if scf_fraction < 1e-6:
@@ -120,10 +126,14 @@ def pretrain_scalar_wavefunction(
     start_iteration: int = 0,
     opt_state: Optional[optax.OptState] = None,
     data: Optional[networks.KANetsData] = None,
+    use_pmap: bool = False,
+    devices=None,
+    num_devices: int = 1,
 ):
   """Pretrains MKAN log-amplitudes to match an HF/DFT Slater reference."""
   optimizer = optax.adam(3.e-4)
   opt_state_pt = optimizer.init(params) if opt_state is None else opt_state
+  devices = tuple(devices) if devices is not None else tuple(jax.local_devices()[:num_devices])
 
   pretrain_step = make_pretrain_step(
       batch_network=batch_network,
@@ -134,30 +144,49 @@ def pretrain_scalar_wavefunction(
       phase_weight=phase_weight,
       mcmc_steps=mcmc_steps,
       mcmc_width=mcmc_width,
+      mcmc_jit=not use_pmap,
   )
+  if use_pmap:
+    pretrain_step = constants.pmap(
+        pretrain_step,
+        in_axes=(multi_device.DATA_IN_AXES, 0, 0, 0, None),
+        out_axes=(multi_device.DATA_IN_AXES, 0, 0, 0),
+        devices=devices,
+    )
 
   if data is None:
     data = networks.KANetsData(
         positions=positions, spins=spins, atoms=atoms, charges=charges
     )
+  if use_pmap:
+    data = multi_device.shard_data(data, num_devices)
+    params = multi_device.replicate(params, devices)
+    opt_state_pt = multi_device.replicate(opt_state_pt, devices)
 
   iterator = trange(
       start_iteration, iterations, desc='Pretrain-MKAN', dynamic_ncols=True
   )
 
   for t in iterator:
-    sharded_key, subkeys = jax.random.split(sharded_key)
+    sharded_key, subkeys = multi_device.split_step_key(sharded_key, num_devices, use_pmap)
     data, params, opt_state_pt, loss = pretrain_step(
         data, params, opt_state_pt, subkeys, scf_approx)
     step = t + 1
-    loss_value = float(jnp.real(loss))
+    loss_value = float(jnp.mean(jnp.real(loss)))
     iterator.set_postfix(iter=step, loss=f'{loss_value:.6f}')
 
     if logger:
       logger(step, loss_value)
     if checkpoint_callback:
+      checkpoint_params = multi_device.unreplicate(params) if use_pmap else params
+      checkpoint_state = multi_device.unreplicate(opt_state_pt) if use_pmap else opt_state_pt
+      checkpoint_data = multi_device.unshard_data(data) if use_pmap else data
       checkpoint_callback(
-          step, loss_value, params, opt_state_pt, data, sharded_key
+          step, loss_value, checkpoint_params, checkpoint_state, checkpoint_data, sharded_key
       )
 
+  if use_pmap:
+    params = multi_device.unreplicate(params)
+    opt_state_pt = multi_device.unreplicate(opt_state_pt)
+    data = multi_device.unshard_data(data)
   return params, data, opt_state_pt, sharded_key

@@ -158,6 +158,7 @@ def make_vmcmc_step(
     ndim: int,
     nelectrons: int,
     steps: int = 1,
+    jit: bool = True,
 ):
     """Builds a training-loop compatible VMCMC step: (params, data, key, width)->(new_data, pmove)."""
     if steps <= 0:
@@ -182,4 +183,6 @@ def make_vmcmc_step(
         )
         return new_data, pmove
 
-    return jax.jit(vmcmc_step)
+    if jit:
+        return jax.jit(vmcmc_step)
+    return vmcmc_step

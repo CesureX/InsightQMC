@@ -34,6 +34,9 @@ class PretrainRunner:
         debug: bool,
         scalar_pretrain: bool = False,
         phase_weight: float = 1.0e-2,
+        use_pmap: bool = False,
+        devices=None,
+        num_devices: int = 1,
     ):
         self.run_manager = run_manager
         self.build_checkpoint_state = build_checkpoint_state
@@ -62,6 +65,9 @@ class PretrainRunner:
         self.debug = debug
         self.scalar_pretrain = scalar_pretrain
         self.phase_weight = phase_weight
+        self.use_pmap = use_pmap
+        self.devices = devices
+        self.num_devices = num_devices
 
     def run(
         self,
@@ -142,6 +148,9 @@ class PretrainRunner:
                         start_iteration=pretrain_start_step,
                         opt_state=pretrain_opt_state,
                         data=data,
+                        use_pmap=self.use_pmap,
+                        devices=self.devices,
+                        num_devices=self.num_devices,
                     )
                 )
             else:
@@ -168,6 +177,9 @@ class PretrainRunner:
                     start_iteration=pretrain_start_step,
                     opt_state=pretrain_opt_state,
                     data=data,
+                    use_pmap=self.use_pmap,
+                    devices=self.devices,
+                    num_devices=self.num_devices,
                 )
         elif self.method == 'dft':
             if self.hf_states != 0:
@@ -210,6 +222,9 @@ class PretrainRunner:
                         start_iteration=pretrain_start_step,
                         opt_state=pretrain_opt_state,
                         data=data,
+                        use_pmap=self.use_pmap,
+                        devices=self.devices,
+                        num_devices=self.num_devices,
                     )
                 )
             else:
@@ -235,6 +250,9 @@ class PretrainRunner:
                     start_iteration=pretrain_start_step,
                     opt_state=pretrain_opt_state,
                     data=data,
+                    use_pmap=self.use_pmap,
+                    devices=self.devices,
+                    num_devices=self.num_devices,
                 )
         else:
             raise ValueError(f"Unsupported pretrain_method: {self.method}. Expected 'hf' or 'dft'.")

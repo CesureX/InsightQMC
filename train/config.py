@@ -44,6 +44,10 @@ def default() -> ml_collections.ConfigDict:
         'learning_rate': 0.00002,
         'learning_rate_decay': 50000.0,
         'gradient_clip_norm': 1.0,
+        'multi_device': True,
+        # 0 means use all local JAX devices. batch_size is the global batch and
+        # must be divisible by the number of devices used.
+        'num_devices': 0,
         'reset_optimizer_on_resume': True,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
