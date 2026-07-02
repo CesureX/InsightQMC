@@ -5,14 +5,14 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 2048,
-        'layer_dims': [8, 16, 8],
+        'batch_size': 8192,
+        'layer_dims': [8, 16, 6],
         'g': [10],
         'k': [3], #7
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 120000,
-        'preiterations': 4000,
+        'iterations': 20000,
+        'preiterations': 5000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -47,7 +47,7 @@ def default() -> ml_collections.ConfigDict:
         'reset_optimizer_on_resume': True,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
-        'envelope_type': 'chebyshev', #(isotropic), (chebyshev) is recommended for better performance
+        'envelope_type': 'legendre_anisotropic', # isotropic, chebyshev, legendre,legendre_anisotropic
         'envelope_degree': 7,
         'add_bias': True,
         'external_weights': True,
@@ -64,7 +64,8 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'fourier'
             'input_dim': None,
             'output_dim': None,
-            'width': None,
+            # [n_sum, n_mult] opens MKAN multiplication nodes in that hidden layer.
+            'width': [8, [8, 4], 6],
             'mult_arity': 2,
             'required_parameters': None,
             'pretrain_phase_weight': 1.0e-2,
@@ -77,8 +78,8 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': 4096,
         },
         'system': {
-            'molecule': [system.Atom('C', (0, 0, 0))],
-            'electrons': (4,2),
+            'molecule': [system.Atom('Li', (0, 0, 0))],
+            'electrons': (2,1),
         },
         'jastrow': {
             'ee': True,
@@ -88,10 +89,10 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/C622_eeagg_ndet1_wdet_g10',
+            'root_dir': 'outputs/Li07021024',
             'checkpoint_every': 50,
             'metrics_every': 5,
-            'resume': True,
+            'resume': False,
             'enable_tensorboard': True,
         },
     })

@@ -140,6 +140,7 @@ def make_training_step(
     mcmc_step,
     optimizer_step: OptUpdate,
     reset_if_nan: bool = False,
+    jit: bool = True,
 ) -> Step:
   """Factory to create training step for non-KFAC optimizers."""
   #@functools.partial(jax.vmap, donate_argnums=(0, 1, 2)) we dont have the parallel strategy for it. So comment out this line.
@@ -170,4 +171,6 @@ def make_training_step(
                                lambda: new_state)
     return data, new_params, new_state, loss, aux_data, pmove
 
-  return jax.jit(step)
+  if jit:
+    return jax.jit(step)
+  return step

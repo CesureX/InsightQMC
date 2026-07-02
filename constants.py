@@ -22,10 +22,19 @@ if kfac_jax is not None:
                                    axis_name=PMAP_AXIS_NAME)
 else:
     def psum(value):
-        return value
+        try:
+            return jax.lax.psum(value, axis_name=PMAP_AXIS_NAME)
+        except (NameError, ValueError):
+            return value
 
     def pmean(value):
-        return value
+        try:
+            return jax.lax.pmean(value, axis_name=PMAP_AXIS_NAME)
+        except (NameError, ValueError):
+            return value
 
     def all_gather(value):
-        return value
+        try:
+            return jax.lax.all_gather(value, axis_name=PMAP_AXIS_NAME)
+        except (NameError, ValueError):
+            return value

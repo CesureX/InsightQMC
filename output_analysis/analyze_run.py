@@ -204,7 +204,7 @@ def _loss_ylims_for_run(run_dir: Path) -> tuple[tuple[float, float], tuple[float
     if symbols == {"H"}:
         return (-1.0, 1.0), (-1.0, 1.0)
     if symbols == {"LI"}:
-        return (-9.0, 0.0), (-9.0, 0.0)
+        return (-8.0, -7.0), (-8.0, -7.0)
     return (-40.0, -30.0), (-40.0, -35.0)
 
 def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None, training_loss_ylim: tuple[float, float], tail_loss_ylim: tuple[float, float]) -> None:
@@ -232,7 +232,7 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
     if "train/loss" in series:
         fig, ax = plt.subplots(figsize=(10, 4.8), constrained_layout=True)
         _plot_series(ax, series["train/loss"], "train/loss", rolling=100)
-        ax.set_ylim(-0.55, 0.0)
+        ax.set_ylim(*training_loss_ylim)
         ax.set_xlim(0, 15000)
         ax.set_ylabel("energy / Eh")
         ax.set_title("train/loss")

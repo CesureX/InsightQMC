@@ -4,7 +4,8 @@ from typing import Callable, Mapping, Sequence, Tuple, Union, Optional
 
 from absl import logging
 import chex
-#import constants
+import constants
+import multi_device
 import vmcmc
 import networks
 from tools.utils import scf
@@ -106,8 +107,9 @@ def make_pretrain_step(
     full_det: bool = False,
     scf_fraction: float = 0.0,
     states: int = 0,
-  mcmc_steps: int = 1,
-  mcmc_width: float = 0.02,
+    mcmc_steps: int = 1,
+    mcmc_width: float = 0.02,
+    mcmc_jit: bool = True,
 ):
   """Creates function for performing one step of Hartre-Fock pretraining.
 
@@ -174,6 +176,7 @@ def make_pretrain_step(
       ndim=3,
       nelectrons=sum(electrons),
       steps=mcmc_steps,
+      jit=mcmc_jit,
   )
 
   def loss_fn(
@@ -248,7 +251,8 @@ def make_pretrain_step(
     target = scf_approx.eval_orbitals(data.positions, electrons)
     val_and_grad = jax.value_and_grad(loss_fn, argnums=0)
     loss_val, search_direction = val_and_grad(params, data, target)
-    search_direction = search_direction
+    loss_val = constants.pmean(loss_val)
+    search_direction = constants.pmean(search_direction)
     updates, state = optimizer_update(search_direction, state, params)
     params = optax.apply_updates(params, updates)
     if scf_fraction < 1e-6:
@@ -288,10 +292,14 @@ def pretrain_hartree_fock(
     start_iteration: int = 0,
     opt_state: Optional[optax.OptState] = None,
     data: Optional[networks.KANetsData] = None,
+    use_pmap: bool = False,
+    devices=None,
+    num_devices: int = 1,
 ):
   """Performs training to match initialization as closely as possible to HF."""
   optimizer = optax.adam(3.e-4)
   opt_state_pt = optimizer.init(params) if opt_state is None else opt_state
+  devices = tuple(devices) if devices is not None else tuple(jax.local_devices()[:num_devices])
 
   pretrain_step = make_pretrain_step(
       batch_orbitals,
@@ -304,26 +312,52 @@ def pretrain_hartree_fock(
       states=states,
       mcmc_steps=mcmc_steps,
       mcmc_width=mcmc_width,
+      mcmc_jit=not use_pmap,
   )
+  if use_pmap:
+    pretrain_step = constants.pmap(
+        pretrain_step,
+        in_axes=(multi_device.DATA_IN_AXES, 0, 0, 0, None),
+        out_axes=(multi_device.DATA_IN_AXES, 0, 0, 0),
+        devices=devices,
+    )
 
   if data is None:
     data = networks.KANetsData(
         positions=positions, spins=spins, atoms=atoms, charges=charges
     )
+  if use_pmap:
+    data = multi_device.shard_data(data, num_devices)
+    params = multi_device.replicate(params, devices)
+    opt_state_pt = multi_device.replicate(opt_state_pt, devices)
 
   iterator = trange(start_iteration, iterations, desc='Pretrain', dynamic_ncols=True)
 
   for t in iterator:
-    sharded_key, subkeys = jax.random.split(sharded_key)
+    sharded_key, subkeys = multi_device.split_step_key(sharded_key, num_devices, use_pmap)
     data, params, opt_state_pt, loss, = pretrain_step(
         data, params, opt_state_pt, subkeys, scf_approx)
     step = t + 1
-    loss_value = float(jnp.real(loss))
+    loss_value = float(jnp.mean(jnp.real(loss)))
     iterator.set_postfix(iter=step, loss=f'{loss_value:.6f}')
 
     if logger:
       logger(step, loss_value)
     if checkpoint_callback:
-      checkpoint_callback(step, loss_value, params, opt_state_pt, data, sharded_key)
+      checkpoint_params = multi_device.unreplicate(params) if use_pmap else params
+      checkpoint_state = multi_device.unreplicate(opt_state_pt) if use_pmap else opt_state_pt
+      checkpoint_data = multi_device.unshard_data(data) if use_pmap else data
+      checkpoint_callback(
+          step,
+          loss_value,
+          checkpoint_params,
+          checkpoint_state,
+          checkpoint_data,
+          sharded_key,
+      )
 
+  if use_pmap:
+    params = multi_device.unreplicate(params)
+    opt_state_pt = multi_device.unreplicate(opt_state_pt)
+    data = multi_device.unshard_data(data)
   return params, data, opt_state_pt, sharded_key

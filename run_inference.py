@@ -237,19 +237,35 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             r_ae_channels = [
                 channel for channel, spin in zip(r_ae_channels, electrons) if spin > 0
             ]
+            ae_channels = jnp.split(ae, spin_partitions, axis=0)
+            ae_channels = [
+                channel for channel, spin in zip(ae_channels, electrons) if spin > 0
+            ]
             envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
             if envelope_type == 'isotropic':
                 apply_envelope = envelope.apply_isotropic_envelope
             elif envelope_type == 'chebyshev':
                 apply_envelope = envelope.apply_chebyshev_envelope
+            elif envelope_type == 'legendre':
+                apply_envelope = envelope.apply_legendre_envelope
+            elif envelope.is_legendre_anisotropic(envelope_type):
+                apply_envelope = envelope.apply_legendre_anisotropic_envelope
             else:
                 raise ValueError(f'Unsupported envelope_type={envelope_type!r}.')
-            orbital_channels = [
-                channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
-                for channel, r_ae_channel, envelope_param in zip(
-                    orbital_channels, r_ae_channels, params['envelope']
-                )
-            ]
+            if envelope.is_legendre_anisotropic(envelope_type):
+                orbital_channels = [
+                    channel * apply_envelope(ae=ae_channel, **envelope_param)
+                    for channel, ae_channel, envelope_param in zip(
+                        orbital_channels, ae_channels, params['envelope']
+                    )
+                ]
+            else:
+                orbital_channels = [
+                    channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
+                    for channel, r_ae_channel, envelope_param in zip(
+                        orbital_channels, r_ae_channels, params['envelope']
+                    )
+                ]
 
         shapes = [
             (spin, -1, nelectrons if full_det else spin)
@@ -300,11 +316,14 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (jnp.ndarray, np.ndarray)):
-        return np.asarray(value).tolist()
+        array = np.asarray(value)
+        if np.iscomplexobj(array):
+            return {'real': array.real.tolist(), 'imag': array.imag.tolist()}
+        return array.tolist()
     if isinstance(value, (np.generic,)):
-        return value.item()
+        return _jsonable(value.item())
     if isinstance(value, complex):
-        return {'real': value.real, 'imag': value.imag}
+        return {'real': float(value.real), 'imag': float(value.imag)}
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
     if isinstance(value, tuple):
@@ -357,13 +376,29 @@ def main() -> None:
             complex_output=bool(cfg.complex_output),
             laplacian_method=cfg.laplacian_method,
         )
+        inference_data = networks.KANetsData(
+            positions=positions,
+            spins=spins,
+            atoms=atoms,
+            charges=charges,
+        )
         energy_keys = jax.random.split(jax.random.PRNGKey(int(cfg.seed)), positions.shape[0])
         local_energy_values, energy_mat = jax.vmap(
             local_energy_fn,
-            in_axes=(None, 0, 0, None, None, None),
+            in_axes=(
+                None,
+                0,
+                networks.KANetsData(positions=0, spins=None, atoms=None, charges=None),
+            ),
             out_axes=(0, 0),
-        )(params, energy_keys, positions, spins, atoms, charges)
+        )(params, energy_keys, inference_data)
+        energy_mean = jnp.mean(local_energy_values)
+        energy_variance = jnp.mean(
+            (local_energy_values - energy_mean) * jnp.conj(local_energy_values - energy_mean)
+        ).real
         results['local_energy'] = local_energy_values
+        results['energy_mean'] = energy_mean
+        results['energy_variance'] = energy_variance
         results['local_energy_mat'] = energy_mat
 
     json_ready = _jsonable(results)

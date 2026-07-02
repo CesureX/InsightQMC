@@ -12,10 +12,12 @@ import numpy as np
 import optax
 from tqdm.auto import trange
 
+import constants
 import hamiltonian
 import electrons_initialization
 import envelope
 import jastrow
+import multi_device
 import networks
 from jkan.models import MultKAN
 import loss as qmc_loss_functions
@@ -113,6 +115,9 @@ class VMCTrainer:
             debug=self.debug,
             scalar_pretrain=False,
             phase_weight=self.mkan_pretrain_phase_weight,
+            use_pmap=self.use_pmap,
+            devices=self.devices,
+            num_devices=self.num_devices,
         )
 
     def _read_config(self) -> None:
@@ -171,6 +176,32 @@ class VMCTrainer:
         self.learning_rate = float(cfg.learning_rate)
         self.learning_rate_decay = float(cfg.learning_rate_decay)
         self.gradient_clip_norm = float(cfg.get('gradient_clip_norm', 0.0))
+        self.multi_device = bool(cfg.get('multi_device', True))
+        self.requested_num_devices = int(cfg.get('num_devices', 0))
+        if self.requested_num_devices < 0:
+            raise ValueError('num_devices must be non-negative.')
+        local_devices = tuple(jax.local_devices())
+        if not local_devices:
+            raise RuntimeError('JAX did not report any local devices.')
+        if not self.multi_device:
+            self.num_devices = 1
+        elif self.requested_num_devices == 0:
+            self.num_devices = len(local_devices)
+        else:
+            if self.requested_num_devices > len(local_devices):
+                raise ValueError(
+                    f'num_devices={self.requested_num_devices} was requested, '
+                    f'but only {len(local_devices)} local JAX devices are available.'
+                )
+            self.num_devices = self.requested_num_devices
+        self.devices = local_devices[: self.num_devices]
+        self.use_pmap = self.multi_device and self.num_devices > 1
+        if self.use_pmap and self.batch_size % self.num_devices != 0:
+            raise ValueError(
+                f'batch_size={self.batch_size} must be divisible by '
+                f'num_devices={self.num_devices} when multi_device is enabled.'
+            )
+        self.device_batch_size = self.batch_size // (self.num_devices if self.use_pmap else 1)
         self.reset_optimizer_on_resume = bool(cfg.get('reset_optimizer_on_resume', False))
         self.resize_resumed_noise = float(cfg.get('resize_resumed_noise', 0.0))
         self.preiterations = int(cfg.preiterations)
@@ -298,6 +329,19 @@ class VMCTrainer:
                     envelope_output_dims,
                     degree=self.envelope_degree,
                 )
+            elif self.envelope_type == 'legendre':
+                envelope_params = envelope.init_legendre_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                )
+            elif envelope.is_legendre_anisotropic(self.envelope_type):
+                envelope_params = envelope.init_legendre_anisotropic_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                    ndim=3,
+                )
             else:
                 raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
         if self.jastrow_type == 'pade':
@@ -401,17 +445,34 @@ class VMCTrainer:
                 r_ae_channels = [
                     channel for channel, spin in zip(r_ae_channels, self.electrons) if spin > 0
                 ]
-                apply_envelope = (
-                    envelope.apply_chebyshev_envelope
-                    if self.envelope_type == 'chebyshev'
-                    else envelope.apply_isotropic_envelope
-                )
-                orbital_channels = [
-                    channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
-                    for channel, r_ae_channel, envelope_param in zip(
-                        orbital_channels, r_ae_channels, params['envelope']
-                    )
+                ae_channels = jnp.split(ae, spin_partitions, axis=0)
+                ae_channels = [
+                    channel for channel, spin in zip(ae_channels, self.electrons) if spin > 0
                 ]
+                if self.envelope_type == 'isotropic':
+                    apply_envelope = envelope.apply_isotropic_envelope
+                elif self.envelope_type == 'chebyshev':
+                    apply_envelope = envelope.apply_chebyshev_envelope
+                elif self.envelope_type == 'legendre':
+                    apply_envelope = envelope.apply_legendre_envelope
+                elif envelope.is_legendre_anisotropic(self.envelope_type):
+                    apply_envelope = envelope.apply_legendre_anisotropic_envelope
+                else:
+                    raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
+                if envelope.is_legendre_anisotropic(self.envelope_type):
+                    orbital_channels = [
+                        channel * apply_envelope(ae=ae_channel, **envelope_param)
+                        for channel, ae_channel, envelope_param in zip(
+                            orbital_channels, ae_channels, params['envelope']
+                        )
+                    ]
+                else:
+                    orbital_channels = [
+                        channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
+                        for channel, r_ae_channel, envelope_param in zip(
+                            orbital_channels, r_ae_channels, params['envelope']
+                        )
+                    ]
             shapes = [
                 (spin, -1, self.nelectrons if self.full_det else spin)
                 for spin in active_spin_channels
@@ -629,6 +690,7 @@ class VMCTrainer:
             )
             data = networks.KANetsData(positions=pos, spins=self.spins, atoms=self.atoms, charges=self.charges)
 
+        sharded_key = multi_device.canonical_key(sharded_key)
         return params, data, sharded_key, pretrain_start_step, train_start_step, pretrain_opt_state, train_opt_state
 
     def _prepare_resumed_params(self, params, target_params=None):
@@ -840,6 +902,19 @@ class VMCTrainer:
                 output_dims,
                 degree=self.envelope_degree,
             )
+        if self.envelope_type == 'legendre':
+            return envelope.init_legendre_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+            )
+        if envelope.is_legendre_anisotropic(self.envelope_type):
+            return envelope.init_legendre_anisotropic_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+                ndim=3,
+            )
         return None
 
     def _prepare_resumed_envelope(self, params):
@@ -958,6 +1033,34 @@ class VMCTrainer:
             charges=data.charges,
         )
 
+    def _prepare_train_state_for_devices(self, state: train_state.TrainState) -> train_state.TrainState:
+        if not self.use_pmap:
+            return state
+        return state.replace(
+            params=multi_device.replicate(state.params, self.devices),
+            opt_state=multi_device.replicate(state.opt_state, self.devices),
+        )
+
+    def _prepare_data_for_devices(self, data: networks.KANetsData) -> networks.KANetsData:
+        if not self.use_pmap:
+            return data
+        return multi_device.shard_data(data, self.num_devices)
+
+    def _host_params(self, params):
+        if not self.use_pmap:
+            return params
+        return multi_device.unreplicate(params)
+
+    def _host_opt_state(self, opt_state):
+        if not self.use_pmap:
+            return opt_state
+        return multi_device.unreplicate(opt_state)
+
+    def _host_data(self, data: networks.KANetsData) -> networks.KANetsData:
+        if not self.use_pmap:
+            return data
+        return multi_device.unshard_data(data)
+
     def _build_optimizer(self):
         def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
             return self.learning_rate / (1.0 + t_ / self.learning_rate_decay)
@@ -1002,12 +1105,21 @@ class VMCTrainer:
             ndim=3,
             nelectrons=self.nelectrons,
             steps=self.mcmc_steps,
+            jit=not self.use_pmap,
         )
         step_fn = make_training_step(
             mcmc_step=monte_carlo,
             optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
             reset_if_nan=True,
+            jit=not self.use_pmap,
         )
+        if self.use_pmap:
+            step_fn = constants.pmap(
+                step_fn,
+                in_axes=(multi_device.DATA_IN_AXES, 0, 0, 0, None),
+                out_axes=(multi_device.DATA_IN_AXES, 0, 0, 0, 0, 0),
+                devices=self.devices,
+            )
         return optimizer, step_fn
 
     def _build_train_state(self, params, optimizer, train_opt_state):
@@ -1035,10 +1147,10 @@ class VMCTrainer:
         initial_state = self._build_checkpoint_state(
             stage='train',
             step=train_start_step,
-            params=state.params,
-            data=runtime.data,
+            params=self._host_params(state.params),
+            data=self._host_data(runtime.data),
             key=runtime.key,
-            train_opt_state=state.opt_state,
+            train_opt_state=self._host_opt_state(state.opt_state),
         )
         self.run_manager.checkpoints.save_last(initial_state)
 
@@ -1052,7 +1164,11 @@ class VMCTrainer:
             else {}
         )
         for t in iterator:
-            key, subkeys = jax.random.split(runtime.key, 2)
+            key, subkeys = multi_device.split_step_key(
+                runtime.key,
+                self.num_devices,
+                self.use_pmap,
+            )
             data, params, opt_state, loss, aux_data, pmove = step_fn(
                 runtime.data,
                 state.params,
@@ -1079,8 +1195,8 @@ class VMCTrainer:
 
             pmove_window_mean = float(np.mean(valid_pmoves)) if valid_pmoves.size else _to_scalar(pmove_mean)
             step_id = t + 1
-            loss_value = float(jnp.real(loss))
-            variance_value = float(aux_data.variance)
+            loss_value = float(jnp.mean(jnp.real(loss)))
+            variance_value = float(jnp.mean(jnp.real(aux_data.variance)))
             iterator.set_postfix(iter=step_id, loss=f'{loss_value:.6f}')
 
             if self.run_manager.should_log(step_id, self.iterations):
@@ -1098,10 +1214,11 @@ class VMCTrainer:
 
             if step_id in grid_extension_targets:
                 g_new = grid_extension_targets[step_id]
-                params = extend_mkan_grid(state.params, data, g_new)
+                params = extend_mkan_grid(self._host_params(state.params), self._host_data(data), g_new)
                 optimizer, step_fn = self._build_train_step(signed_network, logabs_network, log_network)
                 step = state.step
                 state = self._build_train_state(params, optimizer, train_opt_state=None)
+                state = self._prepare_train_state_for_devices(state)
                 state = state.replace(step=step)
                 iterator.write(f'Extended MKAN grid to G={g_new} at train step {step_id}.')
                 self.run_manager.log_scalars('train', step_id, {'grid_G': float(g_new)})
@@ -1109,10 +1226,10 @@ class VMCTrainer:
             checkpoint_state = self._build_checkpoint_state(
                 stage='train',
                 step=step_id,
-                params=state.params,
-                data=data,
+                params=self._host_params(state.params),
+                data=self._host_data(data),
                 key=key,
-                train_opt_state=state.opt_state,
+                train_opt_state=self._host_opt_state(state.opt_state),
             )
             if self.run_manager.should_checkpoint(step_id, self.iterations):
                 self.run_manager.checkpoints.save_step('train', step_id, checkpoint_state)
@@ -1152,9 +1269,10 @@ class VMCTrainer:
 
             optimizer, step_fn = self._build_train_step(signed_network, logabs_network, log_network)
             state = self._build_train_state(params, optimizer, train_opt_state)
+            state = self._prepare_train_state_for_devices(state)
 
             runtime = RuntimeState(
-                data=data,
+                data=self._prepare_data_for_devices(data),
                 key=sharded_key,
                 mcmc_width=jnp.asarray(self.mcmc_width),
                 pmoves=np.full((self.adapt_frequency,), np.nan, dtype=np.float32),
