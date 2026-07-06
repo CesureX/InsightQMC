@@ -329,6 +329,19 @@ class VMCTrainer:
                     envelope_output_dims,
                     degree=self.envelope_degree,
                 )
+            elif self.envelope_type == 'legendre':
+                envelope_params = envelope.init_legendre_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                )
+            elif envelope.is_legendre_anisotropic(self.envelope_type):
+                envelope_params = envelope.init_legendre_anisotropic_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                    ndim=3,
+                )
             else:
                 raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
         if self.jastrow_type == 'pade':
@@ -432,17 +445,34 @@ class VMCTrainer:
                 r_ae_channels = [
                     channel for channel, spin in zip(r_ae_channels, self.electrons) if spin > 0
                 ]
-                apply_envelope = (
-                    envelope.apply_chebyshev_envelope
-                    if self.envelope_type == 'chebyshev'
-                    else envelope.apply_isotropic_envelope
-                )
-                orbital_channels = [
-                    channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
-                    for channel, r_ae_channel, envelope_param in zip(
-                        orbital_channels, r_ae_channels, params['envelope']
-                    )
+                ae_channels = jnp.split(ae, spin_partitions, axis=0)
+                ae_channels = [
+                    channel for channel, spin in zip(ae_channels, self.electrons) if spin > 0
                 ]
+                if self.envelope_type == 'isotropic':
+                    apply_envelope = envelope.apply_isotropic_envelope
+                elif self.envelope_type == 'chebyshev':
+                    apply_envelope = envelope.apply_chebyshev_envelope
+                elif self.envelope_type == 'legendre':
+                    apply_envelope = envelope.apply_legendre_envelope
+                elif envelope.is_legendre_anisotropic(self.envelope_type):
+                    apply_envelope = envelope.apply_legendre_anisotropic_envelope
+                else:
+                    raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
+                if envelope.is_legendre_anisotropic(self.envelope_type):
+                    orbital_channels = [
+                        channel * apply_envelope(ae=ae_channel, **envelope_param)
+                        for channel, ae_channel, envelope_param in zip(
+                            orbital_channels, ae_channels, params['envelope']
+                        )
+                    ]
+                else:
+                    orbital_channels = [
+                        channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
+                        for channel, r_ae_channel, envelope_param in zip(
+                            orbital_channels, r_ae_channels, params['envelope']
+                        )
+                    ]
             shapes = [
                 (spin, -1, self.nelectrons if self.full_det else spin)
                 for spin in active_spin_channels
@@ -871,6 +901,19 @@ class VMCTrainer:
                 self.natoms,
                 output_dims,
                 degree=self.envelope_degree,
+            )
+        if self.envelope_type == 'legendre':
+            return envelope.init_legendre_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+            )
+        if envelope.is_legendre_anisotropic(self.envelope_type):
+            return envelope.init_legendre_anisotropic_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+                ndim=3,
             )
         return None
 

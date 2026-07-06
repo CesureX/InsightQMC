@@ -1,0 +1,297 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1080" viewBox="0 0 1700 1080">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#222"/>
+    </marker>
+    <style>
+      text {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        fill: #111;
+      }
+      .title { font-size: 34px; font-weight: 700; }
+      .sub { font-size: 18px; fill: #444; }
+      .label { font-size: 17px; font-weight: 700; }
+      .small { font-size: 14px; fill: #444; }
+      .math { font-family: "Times New Roman", serif; font-size: 18px; fill: #111; }
+      .nodeText { font-family: "Times New Roman", serif; font-size: 18px; fill: #fff; }
+      .outText { font-family: "Times New Roman", serif; font-size: 17px; fill: #111; }
+      .circle { fill: #000; stroke: #000; stroke-width: 2; }
+      .square { fill: #eef9ff; stroke: #174d63; stroke-width: 2.2; }
+      .sumNode { fill: #000; stroke: #000; stroke-width: 2; }
+      .outNode { fill: #000; stroke: #000; stroke-width: 2; }
+      .line { stroke: #222; stroke-width: 1.65; fill: none; marker-end: url(#arrow); }
+      .thin { stroke: #4a4a4a; stroke-width: 1.25; fill: none; marker-end: url(#arrow); }
+      .lane { fill: #fafafa; stroke: #ddd; stroke-width: 1.3; }
+      .box { fill: #fff; stroke: #777; stroke-width: 1.3; }
+      .note { fill: #fffdf4; stroke: #d1a43c; stroke-width: 1.4; }
+      .bad { fill: #fff6f6; stroke: #d85c5c; stroke-width: 1.4; }
+      .matrix { fill: #fff; stroke: #555; stroke-width: 1.5; }
+      .brace { stroke: #777; stroke-width: 2; fill: none; }
+      .dash { stroke: #888; stroke-width: 1.3; stroke-dasharray: 7 5; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1700" height="1080" fill="#fff"/>
+
+  <text x="60" y="58" class="title">KAN black-dot / square diagram: no electron-electron aggregation</text>
+  <text x="60" y="90" class="sub">Example: 3 electrons, each electron input is h_i=[r_i,x_i,y_i], shared KAN 3 -> 2 -> 3.</text>
+
+  <rect x="60" y="120" width="510" height="68" rx="8" class="note"/>
+  <circle cx="88" cy="148" r="13" class="circle"/>
+  <text x="114" y="154" class="small">black dot = node / sum result</text>
+  <rect x="305" y="134" width="24" height="24" class="square"/>
+  <text x="345" y="154" class="small">square = one edge function phi or psi</text>
+  <text x="84" y="178" class="small">Every electron lane uses the same parameters, but no lines go between electron lanes.</text>
+
+  <rect x="1180" y="120" width="455" height="68" rx="8" class="bad"/>
+  <text x="1204" y="150" class="label">Not this:</text>
+  <text x="1295" y="150" class="math">z11 + z21 + z31</text>
+  <text x="1295" y="176" class="math">z12 + z22 + z32</text>
+  <text x="1485" y="163" class="small">no cross-electron sum</text>
+
+  <!-- column labels -->
+  <text x="92" y="232" class="label">input features</text>
+  <text x="383" y="232" class="label">KAN layer 1</text>
+  <text x="720" y="232" class="label">KAN layer 2</text>
+  <text x="1076" y="232" class="label">orbital row</text>
+  <text x="1325" y="232" class="label">orbital matrix</text>
+
+  <!-- lane backgrounds -->
+  <rect x="60" y="260" width="1070" height="205" rx="8" class="lane"/>
+  <rect x="60" y="500" width="1070" height="205" rx="8" class="lane"/>
+  <rect x="60" y="740" width="1070" height="205" rx="8" class="lane"/>
+
+  <text x="82" y="288" class="label">electron 1</text>
+  <text x="82" y="528" class="label">electron 2</text>
+  <text x="82" y="768" class="label">electron 3</text>
+
+  <!-- Electron 1 inputs -->
+  <circle cx="180" cy="305" r="20" class="circle"/>
+  <circle cx="180" cy="362" r="20" class="circle"/>
+  <circle cx="180" cy="419" r="20" class="circle"/>
+  <text x="173" y="311" class="nodeText">r1</text>
+  <text x="172" y="368" class="nodeText">x1</text>
+  <text x="172" y="425" class="nodeText">y1</text>
+
+  <!-- Electron 1 edge squares to z -->
+  <rect x="315" y="292" width="25" height="25" class="square"/>
+  <rect x="315" y="350" width="25" height="25" class="square"/>
+  <rect x="315" y="407" width="25" height="25" class="square"/>
+  <rect x="315" y="326" width="25" height="25" class="square"/>
+  <rect x="315" y="382" width="25" height="25" class="square"/>
+  <rect x="315" y="438" width="25" height="25" class="square"/>
+
+  <circle cx="475" cy="335" r="24" class="sumNode"/>
+  <circle cx="475" cy="402" r="24" class="sumNode"/>
+  <text x="462" y="341" class="nodeText">z11</text>
+  <text x="462" y="408" class="nodeText">z12</text>
+
+  <!-- Electron 1 input to squares -->
+  <path d="M200 305 L315 304" class="thin"/>
+  <path d="M200 362 L315 362" class="thin"/>
+  <path d="M200 419 L315 419" class="thin"/>
+  <path d="M200 305 C245 315, 270 325, 315 339" class="thin"/>
+  <path d="M200 362 C245 371, 270 378, 315 395" class="thin"/>
+  <path d="M200 419 C245 431, 270 442, 315 451" class="thin"/>
+  <path d="M340 304 C390 307, 420 318, 451 335" class="line"/>
+  <path d="M340 362 C392 359, 423 349, 451 335" class="line"/>
+  <path d="M340 419 C392 404, 423 374, 451 335" class="line"/>
+  <path d="M340 339 C390 347, 420 370, 451 402" class="line"/>
+  <path d="M340 395 C392 397, 423 400, 451 402" class="line"/>
+  <path d="M340 451 C392 444, 423 425, 451 402" class="line"/>
+
+  <!-- Electron 1 z to Y squares -->
+  <rect x="620" y="282" width="25" height="25" class="square"/>
+  <rect x="620" y="340" width="25" height="25" class="square"/>
+  <rect x="620" y="398" width="25" height="25" class="square"/>
+  <rect x="678" y="310" width="25" height="25" class="square"/>
+  <rect x="678" y="369" width="25" height="25" class="square"/>
+  <rect x="678" y="426" width="25" height="25" class="square"/>
+
+  <circle cx="870" cy="305" r="24" class="outNode"/>
+  <circle cx="870" cy="362" r="24" class="outNode"/>
+  <circle cx="870" cy="419" r="24" class="outNode"/>
+  <text x="856" y="311" class="nodeText">Y11</text>
+  <text x="856" y="368" class="nodeText">Y12</text>
+  <text x="856" y="425" class="nodeText">Y13</text>
+
+  <path d="M499 335 C548 305, 573 294, 620 294" class="thin"/>
+  <path d="M499 402 C548 365, 573 350, 620 352" class="thin"/>
+  <path d="M499 335 C548 340, 573 350, 620 352" class="thin"/>
+  <path d="M499 402 C548 398, 573 407, 620 411" class="thin"/>
+  <path d="M499 335 C548 375, 606 412, 678 438" class="thin"/>
+  <path d="M499 402 C548 420, 606 435, 678 438" class="thin"/>
+  <path d="M645 294 C730 285, 796 290, 846 305" class="line"/>
+  <path d="M703 322 C765 321, 812 307, 846 305" class="line"/>
+  <path d="M645 352 C730 347, 795 355, 846 362" class="line"/>
+  <path d="M703 381 C765 382, 812 371, 846 362" class="line"/>
+  <path d="M645 411 C730 410, 795 414, 846 419" class="line"/>
+  <path d="M703 438 C765 438, 812 426, 846 419" class="line"/>
+
+  <!-- Electron 2 inputs/nodes -->
+  <circle cx="180" cy="545" r="20" class="circle"/>
+  <circle cx="180" cy="602" r="20" class="circle"/>
+  <circle cx="180" cy="659" r="20" class="circle"/>
+  <text x="173" y="551" class="nodeText">r2</text>
+  <text x="172" y="608" class="nodeText">x2</text>
+  <text x="172" y="665" class="nodeText">y2</text>
+
+  <rect x="315" y="532" width="25" height="25" class="square"/>
+  <rect x="315" y="590" width="25" height="25" class="square"/>
+  <rect x="315" y="647" width="25" height="25" class="square"/>
+  <rect x="315" y="566" width="25" height="25" class="square"/>
+  <rect x="315" y="622" width="25" height="25" class="square"/>
+  <rect x="315" y="678" width="25" height="25" class="square"/>
+
+  <circle cx="475" cy="575" r="24" class="sumNode"/>
+  <circle cx="475" cy="642" r="24" class="sumNode"/>
+  <text x="462" y="581" class="nodeText">z21</text>
+  <text x="462" y="648" class="nodeText">z22</text>
+
+  <path d="M200 545 L315 544" class="thin"/>
+  <path d="M200 602 L315 602" class="thin"/>
+  <path d="M200 659 L315 659" class="thin"/>
+  <path d="M200 545 C245 555, 270 565, 315 579" class="thin"/>
+  <path d="M200 602 C245 611, 270 618, 315 635" class="thin"/>
+  <path d="M200 659 C245 671, 270 682, 315 691" class="thin"/>
+  <path d="M340 544 C390 547, 420 558, 451 575" class="line"/>
+  <path d="M340 602 C392 599, 423 589, 451 575" class="line"/>
+  <path d="M340 659 C392 644, 423 614, 451 575" class="line"/>
+  <path d="M340 579 C390 587, 420 610, 451 642" class="line"/>
+  <path d="M340 635 C392 637, 423 640, 451 642" class="line"/>
+  <path d="M340 691 C392 684, 423 665, 451 642" class="line"/>
+
+  <rect x="620" y="522" width="25" height="25" class="square"/>
+  <rect x="620" y="580" width="25" height="25" class="square"/>
+  <rect x="620" y="638" width="25" height="25" class="square"/>
+  <rect x="678" y="550" width="25" height="25" class="square"/>
+  <rect x="678" y="609" width="25" height="25" class="square"/>
+  <rect x="678" y="666" width="25" height="25" class="square"/>
+
+  <circle cx="870" cy="545" r="24" class="outNode"/>
+  <circle cx="870" cy="602" r="24" class="outNode"/>
+  <circle cx="870" cy="659" r="24" class="outNode"/>
+  <text x="856" y="551" class="nodeText">Y21</text>
+  <text x="856" y="608" class="nodeText">Y22</text>
+  <text x="856" y="665" class="nodeText">Y23</text>
+
+  <path d="M499 575 C548 545, 573 534, 620 534" class="thin"/>
+  <path d="M499 642 C548 605, 573 590, 620 592" class="thin"/>
+  <path d="M499 575 C548 580, 573 590, 620 592" class="thin"/>
+  <path d="M499 642 C548 638, 573 647, 620 651" class="thin"/>
+  <path d="M499 575 C548 615, 606 652, 678 678" class="thin"/>
+  <path d="M499 642 C548 660, 606 675, 678 678" class="thin"/>
+  <path d="M645 534 C730 525, 796 530, 846 545" class="line"/>
+  <path d="M703 562 C765 561, 812 547, 846 545" class="line"/>
+  <path d="M645 592 C730 587, 795 595, 846 602" class="line"/>
+  <path d="M703 621 C765 622, 812 611, 846 602" class="line"/>
+  <path d="M645 651 C730 650, 795 654, 846 659" class="line"/>
+  <path d="M703 678 C765 678, 812 666, 846 659" class="line"/>
+
+  <!-- Electron 3 inputs/nodes -->
+  <circle cx="180" cy="785" r="20" class="circle"/>
+  <circle cx="180" cy="842" r="20" class="circle"/>
+  <circle cx="180" cy="899" r="20" class="circle"/>
+  <text x="173" y="791" class="nodeText">r3</text>
+  <text x="172" y="848" class="nodeText">x3</text>
+  <text x="172" y="905" class="nodeText">y3</text>
+
+  <rect x="315" y="772" width="25" height="25" class="square"/>
+  <rect x="315" y="830" width="25" height="25" class="square"/>
+  <rect x="315" y="887" width="25" height="25" class="square"/>
+  <rect x="315" y="806" width="25" height="25" class="square"/>
+  <rect x="315" y="862" width="25" height="25" class="square"/>
+  <rect x="315" y="918" width="25" height="25" class="square"/>
+
+  <circle cx="475" cy="815" r="24" class="sumNode"/>
+  <circle cx="475" cy="882" r="24" class="sumNode"/>
+  <text x="462" y="821" class="nodeText">z31</text>
+  <text x="462" y="888" class="nodeText">z32</text>
+
+  <path d="M200 785 L315 784" class="thin"/>
+  <path d="M200 842 L315 842" class="thin"/>
+  <path d="M200 899 L315 899" class="thin"/>
+  <path d="M200 785 C245 795, 270 805, 315 819" class="thin"/>
+  <path d="M200 842 C245 851, 270 858, 315 875" class="thin"/>
+  <path d="M200 899 C245 911, 270 922, 315 931" class="thin"/>
+  <path d="M340 784 C390 787, 420 798, 451 815" class="line"/>
+  <path d="M340 842 C392 839, 423 829, 451 815" class="line"/>
+  <path d="M340 899 C392 884, 423 854, 451 815" class="line"/>
+  <path d="M340 819 C390 827, 420 850, 451 882" class="line"/>
+  <path d="M340 875 C392 877, 423 880, 451 882" class="line"/>
+  <path d="M340 931 C392 924, 423 905, 451 882" class="line"/>
+
+  <rect x="620" y="762" width="25" height="25" class="square"/>
+  <rect x="620" y="820" width="25" height="25" class="square"/>
+  <rect x="620" y="878" width="25" height="25" class="square"/>
+  <rect x="678" y="790" width="25" height="25" class="square"/>
+  <rect x="678" y="849" width="25" height="25" class="square"/>
+  <rect x="678" y="906" width="25" height="25" class="square"/>
+
+  <circle cx="870" cy="785" r="24" class="outNode"/>
+  <circle cx="870" cy="842" r="24" class="outNode"/>
+  <circle cx="870" cy="899" r="24" class="outNode"/>
+  <text x="856" y="791" class="nodeText">Y31</text>
+  <text x="856" y="848" class="nodeText">Y32</text>
+  <text x="856" y="905" class="nodeText">Y33</text>
+
+  <path d="M499 815 C548 785, 573 774, 620 774" class="thin"/>
+  <path d="M499 882 C548 845, 573 830, 620 832" class="thin"/>
+  <path d="M499 815 C548 820, 573 830, 620 832" class="thin"/>
+  <path d="M499 882 C548 878, 573 887, 620 891" class="thin"/>
+  <path d="M499 815 C548 855, 606 892, 678 918" class="thin"/>
+  <path d="M499 882 C548 900, 606 915, 678 918" class="thin"/>
+  <path d="M645 774 C730 765, 796 770, 846 785" class="line"/>
+  <path d="M703 802 C765 801, 812 787, 846 785" class="line"/>
+  <path d="M645 832 C730 827, 795 835, 846 842" class="line"/>
+  <path d="M703 861 C765 862, 812 851, 846 842" class="line"/>
+  <path d="M645 891 C730 890, 795 894, 846 899" class="line"/>
+  <path d="M703 918 C765 918, 812 906, 846 899" class="line"/>
+
+  <!-- shared parameter braces -->
+  <path d="M300 970 C300 995, 340 995, 340 1015 L730 1015 C730 995, 770 995, 770 970" class="brace"/>
+  <text x="382" y="1048" class="small">same phi / psi parameters reused in electron 1, 2, 3 lanes</text>
+
+  <!-- matrix and determinant area -->
+  <rect x="1210" y="285" width="378" height="330" rx="8" class="box"/>
+  <text x="1252" y="318" class="label">Y matrix before envelope</text>
+  <rect x="1260" y="355" width="90" height="55" class="matrix"/>
+  <rect x="1350" y="355" width="90" height="55" class="matrix"/>
+  <rect x="1440" y="355" width="90" height="55" class="matrix"/>
+  <rect x="1260" y="410" width="90" height="55" class="matrix"/>
+  <rect x="1350" y="410" width="90" height="55" class="matrix"/>
+  <rect x="1440" y="410" width="90" height="55" class="matrix"/>
+  <rect x="1260" y="465" width="90" height="55" class="matrix"/>
+  <rect x="1350" y="465" width="90" height="55" class="matrix"/>
+  <rect x="1440" y="465" width="90" height="55" class="matrix"/>
+  <text x="1287" y="389" class="outText">Y11</text>
+  <text x="1377" y="389" class="outText">Y12</text>
+  <text x="1467" y="389" class="outText">Y13</text>
+  <text x="1287" y="444" class="outText">Y21</text>
+  <text x="1377" y="444" class="outText">Y22</text>
+  <text x="1467" y="444" class="outText">Y23</text>
+  <text x="1287" y="499" class="outText">Y31</text>
+  <text x="1377" y="499" class="outText">Y32</text>
+  <text x="1467" y="499" class="outText">Y33</text>
+
+  <text x="1242" y="555" class="math">A_ik = E_ik * Y_ik</text>
+  <text x="1242" y="585" class="math">Psi = exp(J) det(A)</text>
+
+  <path d="M894 305 C1030 305, 1120 350, 1260 382" class="dash"/>
+  <path d="M894 362 C1030 360, 1120 382, 1350 382" class="dash"/>
+  <path d="M894 419 C1030 420, 1120 410, 1440 382" class="dash"/>
+  <path d="M894 545 C1030 535, 1120 430, 1260 437" class="dash"/>
+  <path d="M894 602 C1030 602, 1120 450, 1350 437" class="dash"/>
+  <path d="M894 659 C1030 660, 1120 475, 1440 437" class="dash"/>
+  <path d="M894 785 C1030 765, 1120 492, 1260 492" class="dash"/>
+  <path d="M894 842 C1030 838, 1120 510, 1350 492" class="dash"/>
+  <path d="M894 899 C1030 900, 1120 530, 1440 492" class="dash"/>
+
+  <!-- formulas -->
+  <rect x="1195" y="680" width="415" height="190" rx="8" class="note"/>
+  <text x="1224" y="718" class="label">Layer formulas</text>
+  <text x="1224" y="756" class="math">z_i1 = phi_11(r_i) + phi_12(x_i) + phi_13(y_i)</text>
+  <text x="1224" y="786" class="math">z_i2 = phi_21(r_i) + phi_22(x_i) + phi_23(y_i)</text>
+  <text x="1224" y="827" class="math">Y_ik = psi_k1(z_i1) + psi_k2(z_i2)</text>
+  <text x="1224" y="858" class="small">i is electron index; no summation over i inside KAN layers.</text>
+</svg>

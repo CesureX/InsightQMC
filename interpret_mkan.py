@@ -12,6 +12,7 @@ import ml_collections
 import numpy as np
 from flax import nnx
 
+import envelope
 import networks
 from jkan.models import MultKAN
 from tools.utils import system
@@ -1201,6 +1202,17 @@ def _envelope_payload(
             "E_b(i,c) = sum_A exp(-sigma[b,A,c] * r_iA) * "
             "sum_d c_basis[b,A,d,c] * T_d(tanh(r_iA))"
         )
+    elif envelope_type == "legendre":
+        formula = (
+            "E_b(i,c) = sum_A exp(-sigma[b,A,c] * r_iA) * "
+            "sum_d p_basis[b,A,d,c] * P_d(tanh(r_iA))"
+        )
+    elif envelope.is_legendre_anisotropic(envelope_type):
+        formula = (
+            "E_b(i,c) = sum_A exp(-rho[b,A,c]) * "
+            "sum_d p_basis[b,A,d,c] * P_d(tanh(rho[b,A,c])), "
+            "rho[b,A,c] = ||Sigma[b,A,c] * (r_i - R_A)||"
+        )
     elif envelope_type == "isotropic":
         formula = "E_b(i,c) = sum_A pi[b,A,c] * exp(-sigma[b,A,c] * r_iA)"
     else:
@@ -1232,6 +1244,72 @@ def _envelope_payload(
                         atom_terms.append(
                             f"exp(-({_format_float(sigma[atom_idx, channel_idx])})"
                             f"*{r_symbol})*({_sum_terms(cheb_terms)})"
+                        )
+                    definitions.append(
+                        {
+                            "symbol": f"E_{label}(a,{channel_idx})",
+                            "formula": _sum_terms(atom_terms),
+                        }
+                    )
+            elif envelope_type == "legendre":
+                sigma = np.asarray(block_params["sigma"])
+                p_basis = np.asarray(block_params["p_basis"])
+                for channel_idx in range(output_dim):
+                    atom_terms = []
+                    for atom_idx in range(sigma.shape[0]):
+                        r_symbol = f"r_{label}[a,A{atom_idx}]"
+                        legendre_terms = [
+                            f"({_format_float(p_basis[atom_idx, degree, channel_idx])})"
+                            f"*({_legendre_expr(degree, f'tanh({r_symbol})')})"
+                            for degree in range(p_basis.shape[1])
+                            if abs(float(p_basis[atom_idx, degree, channel_idx])) > 0.0
+                        ]
+                        if not legendre_terms:
+                            legendre_terms = ["0"]
+                        atom_terms.append(
+                            f"exp(-({_format_float(sigma[atom_idx, channel_idx])})"
+                            f"*{r_symbol})*({_sum_terms(legendre_terms)})"
+                        )
+                    definitions.append(
+                        {
+                            "symbol": f"E_{label}(a,{channel_idx})",
+                            "formula": _sum_terms(atom_terms),
+                        }
+                    )
+            elif envelope.is_legendre_anisotropic(envelope_type):
+                sigma = np.asarray(block_params["sigma"])
+                p_basis = np.asarray(block_params["p_basis"])
+                for channel_idx in range(output_dim):
+                    atom_terms = []
+                    for atom_idx in range(sigma.shape[0]):
+                        matrix_rows = [
+                            "["
+                            + ", ".join(
+                                _format_float(sigma[atom_idx, channel_idx, row, col])
+                                for col in range(sigma.shape[3])
+                            )
+                            + "]"
+                            for row in range(sigma.shape[2])
+                        ]
+                        matrix_expr = "[" + ", ".join(matrix_rows) + "]"
+                        ae_symbol = f"ae_{label}[a,A{atom_idx},:]"
+                        rho_symbol = f"rho_{label}(a,A{atom_idx},{channel_idx})"
+                        definitions.append(
+                            {
+                                "symbol": rho_symbol,
+                                "formula": f"norm(({matrix_expr}) @ {ae_symbol})",
+                            }
+                        )
+                        legendre_terms = [
+                            f"({_format_float(p_basis[atom_idx, degree, channel_idx])})"
+                            f"*({_legendre_expr(degree, f'tanh({rho_symbol})')})"
+                            for degree in range(p_basis.shape[1])
+                            if abs(float(p_basis[atom_idx, degree, channel_idx])) > 0.0
+                        ]
+                        if not legendre_terms:
+                            legendre_terms = ["0"]
+                        atom_terms.append(
+                            f"exp(-{rho_symbol})*({_sum_terms(legendre_terms)})"
                         )
                     definitions.append(
                         {

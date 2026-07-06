@@ -237,19 +237,35 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             r_ae_channels = [
                 channel for channel, spin in zip(r_ae_channels, electrons) if spin > 0
             ]
+            ae_channels = jnp.split(ae, spin_partitions, axis=0)
+            ae_channels = [
+                channel for channel, spin in zip(ae_channels, electrons) if spin > 0
+            ]
             envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
             if envelope_type == 'isotropic':
                 apply_envelope = envelope.apply_isotropic_envelope
             elif envelope_type == 'chebyshev':
                 apply_envelope = envelope.apply_chebyshev_envelope
+            elif envelope_type == 'legendre':
+                apply_envelope = envelope.apply_legendre_envelope
+            elif envelope.is_legendre_anisotropic(envelope_type):
+                apply_envelope = envelope.apply_legendre_anisotropic_envelope
             else:
                 raise ValueError(f'Unsupported envelope_type={envelope_type!r}.')
-            orbital_channels = [
-                channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
-                for channel, r_ae_channel, envelope_param in zip(
-                    orbital_channels, r_ae_channels, params['envelope']
-                )
-            ]
+            if envelope.is_legendre_anisotropic(envelope_type):
+                orbital_channels = [
+                    channel * apply_envelope(ae=ae_channel, **envelope_param)
+                    for channel, ae_channel, envelope_param in zip(
+                        orbital_channels, ae_channels, params['envelope']
+                    )
+                ]
+            else:
+                orbital_channels = [
+                    channel * apply_envelope(r_ae=r_ae_channel, **envelope_param)
+                    for channel, r_ae_channel, envelope_param in zip(
+                        orbital_channels, r_ae_channels, params['envelope']
+                    )
+                ]
 
         shapes = [
             (spin, -1, nelectrons if full_det else spin)

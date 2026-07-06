@@ -1,0 +1,293 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#30404f"/>
+    </marker>
+    <marker id="arrowSoft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#668099"/>
+    </marker>
+    <style>
+      text {
+        font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+        fill: #17212b;
+      }
+      .title { font-size: 34px; font-weight: 700; }
+      .subtitle { font-size: 19px; fill: #4d5b68; }
+      .section { font-size: 20px; font-weight: 700; fill: #203040; }
+      .small { font-size: 15px; fill: #51606e; }
+      .tiny { font-size: 13px; fill: #5e6b76; }
+      .math { font-family: "Times New Roman", "Noto Serif CJK SC", serif; font-size: 18px; fill: #111820; }
+      .laneLabel { font-size: 18px; font-weight: 700; fill: #25313d; }
+      .nodeText { font-family: "Times New Roman", serif; font-size: 18px; fill: #111820; }
+      .sumText { font-family: "Times New Roman", serif; font-size: 24px; font-weight: 700; fill: #111820; }
+      .edgeLabel { font-family: "Times New Roman", serif; font-size: 14px; fill: #40556a; }
+      .lane { fill: #f7fafc; stroke: #d7e0e8; stroke-width: 1.5; }
+      .inputNode { fill: #fefefe; stroke: #2f5d7c; stroke-width: 2.2; }
+      .sumNode { fill: #fff8e8; stroke: #c07b22; stroke-width: 2.2; }
+      .hiddenNode { fill: #eef7ff; stroke: #2f6f9f; stroke-width: 2.2; }
+      .outputNode { fill: #f0fbf5; stroke: #2f8b57; stroke-width: 2.2; }
+      .matrixCell { fill: #ffffff; stroke: #7b8a99; stroke-width: 1.4; }
+      .noteBox { fill: #fffdf7; stroke: #e0b65f; stroke-width: 1.4; }
+      .badBox { fill: #fff5f5; stroke: #d96b6b; stroke-width: 1.4; }
+      .layerBand { fill: #edf3f8; stroke: #c7d4df; stroke-width: 1.4; }
+      .line { stroke: #30404f; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .softLine { stroke: #668099; stroke-width: 1.35; fill: none; marker-end: url(#arrowSoft); }
+      .noArrow { stroke: #668099; stroke-width: 1.2; fill: none; }
+      .brace { stroke: #6d7c8b; stroke-width: 2.2; fill: none; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#ffffff"/>
+
+  <text x="64" y="60" class="title">不加入电子-电子信息时的 KAN 连接图</text>
+  <text x="64" y="92" class="subtitle">二维 3 电子示例：每个电子只输入自己的 hᵢ=[rᵢ,xᵢ,yᵢ]；共享 KAN 参数；电子维度一直保留到 determinant。</text>
+
+  <rect x="60" y="125" width="1480" height="70" rx="8" class="noteBox"/>
+  <text x="88" y="154" class="section">关键规则</text>
+  <text x="88" y="181" class="small">KAN 层求和发生在同一个电子行内部：输入特征 → 隐藏节点、隐藏节点 → orbital。不会把电子 1、2、3 的同一列相加。</text>
+
+  <rect x="80" y="230" width="330" height="590" rx="8" class="layerBand"/>
+  <text x="150" y="262" class="section">输入特征</text>
+  <text x="118" y="288" class="small">每行是一个电子</text>
+
+  <rect x="455" y="230" width="305" height="590" rx="8" class="layerBand"/>
+  <text x="510" y="262" class="section">KAN 第 1 层：3 → 2</text>
+  <text x="492" y="288" class="small">边函数 φ 后求和</text>
+
+  <rect x="805" y="230" width="355" height="590" rx="8" class="layerBand"/>
+  <text x="870" y="262" class="section">KAN 第 2 层：2 → 3</text>
+  <text x="846" y="288" class="small">边函数 ψ 后求和</text>
+
+  <rect x="1205" y="230" width="295" height="590" rx="8" class="layerBand"/>
+  <text x="1260" y="262" class="section">orbital 矩阵</text>
+  <text x="1232" y="288" class="small">行=电子，列=orbital</text>
+
+  <!-- Lane backgrounds -->
+  <rect x="100" y="320" width="1380" height="120" rx="8" class="lane"/>
+  <rect x="100" y="495" width="1380" height="120" rx="8" class="lane"/>
+  <rect x="100" y="670" width="1380" height="120" rx="8" class="lane"/>
+
+  <text x="122" y="349" class="laneLabel">电子 1</text>
+  <text x="122" y="524" class="laneLabel">电子 2</text>
+  <text x="122" y="699" class="laneLabel">电子 3</text>
+
+  <!-- Electron 1 inputs -->
+  <circle cx="220" cy="335" r="19" class="inputNode"/>
+  <circle cx="220" cy="380" r="19" class="inputNode"/>
+  <circle cx="220" cy="425" r="19" class="inputNode"/>
+  <text x="213" y="341" class="nodeText">r₁</text>
+  <text x="212" y="386" class="nodeText">x₁</text>
+  <text x="212" y="431" class="nodeText">y₁</text>
+
+  <!-- Electron 2 inputs -->
+  <circle cx="220" cy="510" r="19" class="inputNode"/>
+  <circle cx="220" cy="555" r="19" class="inputNode"/>
+  <circle cx="220" cy="600" r="19" class="inputNode"/>
+  <text x="213" y="516" class="nodeText">r₂</text>
+  <text x="212" y="561" class="nodeText">x₂</text>
+  <text x="212" y="606" class="nodeText">y₂</text>
+
+  <!-- Electron 3 inputs -->
+  <circle cx="220" cy="685" r="19" class="inputNode"/>
+  <circle cx="220" cy="730" r="19" class="inputNode"/>
+  <circle cx="220" cy="775" r="19" class="inputNode"/>
+  <text x="213" y="691" class="nodeText">r₃</text>
+  <text x="212" y="736" class="nodeText">x₃</text>
+  <text x="212" y="781" class="nodeText">y₃</text>
+
+  <!-- Electron 1 layer 1 sums and hidden -->
+  <circle cx="535" cy="352" r="21" class="sumNode"/>
+  <circle cx="535" cy="408" r="21" class="sumNode"/>
+  <text x="525" y="360" class="sumText">Σ</text>
+  <text x="525" y="416" class="sumText">Σ</text>
+  <circle cx="655" cy="352" r="23" class="hiddenNode"/>
+  <circle cx="655" cy="408" r="23" class="hiddenNode"/>
+  <text x="641" y="358" class="nodeText">z₁₁</text>
+  <text x="641" y="414" class="nodeText">z₁₂</text>
+
+  <!-- Electron 2 layer 1 sums and hidden -->
+  <circle cx="535" cy="527" r="21" class="sumNode"/>
+  <circle cx="535" cy="583" r="21" class="sumNode"/>
+  <text x="525" y="535" class="sumText">Σ</text>
+  <text x="525" y="591" class="sumText">Σ</text>
+  <circle cx="655" cy="527" r="23" class="hiddenNode"/>
+  <circle cx="655" cy="583" r="23" class="hiddenNode"/>
+  <text x="641" y="533" class="nodeText">z₂₁</text>
+  <text x="641" y="589" class="nodeText">z₂₂</text>
+
+  <!-- Electron 3 layer 1 sums and hidden -->
+  <circle cx="535" cy="702" r="21" class="sumNode"/>
+  <circle cx="535" cy="758" r="21" class="sumNode"/>
+  <text x="525" y="710" class="sumText">Σ</text>
+  <text x="525" y="766" class="sumText">Σ</text>
+  <circle cx="655" cy="702" r="23" class="hiddenNode"/>
+  <circle cx="655" cy="758" r="23" class="hiddenNode"/>
+  <text x="641" y="708" class="nodeText">z₃₁</text>
+  <text x="641" y="764" class="nodeText">z₃₂</text>
+
+  <!-- Dense edges input -> sums for each electron -->
+  <path d="M239 335 C330 330, 420 335, 514 352" class="softLine"/>
+  <path d="M239 380 C330 370, 420 365, 514 352" class="softLine"/>
+  <path d="M239 425 C330 410, 420 390, 514 352" class="softLine"/>
+  <path d="M239 335 C330 360, 420 390, 514 408" class="softLine"/>
+  <path d="M239 380 C330 390, 420 400, 514 408" class="softLine"/>
+  <path d="M239 425 C330 430, 420 425, 514 408" class="softLine"/>
+
+  <path d="M239 510 C330 505, 420 510, 514 527" class="softLine"/>
+  <path d="M239 555 C330 545, 420 540, 514 527" class="softLine"/>
+  <path d="M239 600 C330 585, 420 565, 514 527" class="softLine"/>
+  <path d="M239 510 C330 535, 420 565, 514 583" class="softLine"/>
+  <path d="M239 555 C330 565, 420 575, 514 583" class="softLine"/>
+  <path d="M239 600 C330 605, 420 600, 514 583" class="softLine"/>
+
+  <path d="M239 685 C330 680, 420 685, 514 702" class="softLine"/>
+  <path d="M239 730 C330 720, 420 715, 514 702" class="softLine"/>
+  <path d="M239 775 C330 760, 420 740, 514 702" class="softLine"/>
+  <path d="M239 685 C330 710, 420 740, 514 758" class="softLine"/>
+  <path d="M239 730 C330 740, 420 750, 514 758" class="softLine"/>
+  <path d="M239 775 C330 780, 420 775, 514 758" class="softLine"/>
+
+  <path d="M556 352 L632 352" class="line"/>
+  <path d="M556 408 L632 408" class="line"/>
+  <path d="M556 527 L632 527" class="line"/>
+  <path d="M556 583 L632 583" class="line"/>
+  <path d="M556 702 L632 702" class="line"/>
+  <path d="M556 758 L632 758" class="line"/>
+
+  <text x="350" y="323" class="edgeLabel">φ₁₁, φ₁₂, φ₁₃</text>
+  <text x="350" y="452" class="edgeLabel">φ₂₁, φ₂₂, φ₂₃</text>
+
+  <!-- Layer 2 sums and outputs, e1 -->
+  <circle cx="900" cy="340" r="20" class="sumNode"/>
+  <circle cx="900" cy="380" r="20" class="sumNode"/>
+  <circle cx="900" cy="420" r="20" class="sumNode"/>
+  <text x="891" y="347" class="sumText">Σ</text>
+  <text x="891" y="387" class="sumText">Σ</text>
+  <text x="891" y="427" class="sumText">Σ</text>
+  <circle cx="1040" cy="340" r="24" class="outputNode"/>
+  <circle cx="1040" cy="380" r="24" class="outputNode"/>
+  <circle cx="1040" cy="420" r="24" class="outputNode"/>
+  <text x="1024" y="346" class="nodeText">Y₁₁</text>
+  <text x="1024" y="386" class="nodeText">Y₁₂</text>
+  <text x="1024" y="426" class="nodeText">Y₁₃</text>
+
+  <!-- Layer 2 sums and outputs, e2 -->
+  <circle cx="900" cy="515" r="20" class="sumNode"/>
+  <circle cx="900" cy="555" r="20" class="sumNode"/>
+  <circle cx="900" cy="595" r="20" class="sumNode"/>
+  <text x="891" y="522" class="sumText">Σ</text>
+  <text x="891" y="562" class="sumText">Σ</text>
+  <text x="891" y="602" class="sumText">Σ</text>
+  <circle cx="1040" cy="515" r="24" class="outputNode"/>
+  <circle cx="1040" cy="555" r="24" class="outputNode"/>
+  <circle cx="1040" cy="595" r="24" class="outputNode"/>
+  <text x="1024" y="521" class="nodeText">Y₂₁</text>
+  <text x="1024" y="561" class="nodeText">Y₂₂</text>
+  <text x="1024" y="601" class="nodeText">Y₂₃</text>
+
+  <!-- Layer 2 sums and outputs, e3 -->
+  <circle cx="900" cy="690" r="20" class="sumNode"/>
+  <circle cx="900" cy="730" r="20" class="sumNode"/>
+  <circle cx="900" cy="770" r="20" class="sumNode"/>
+  <text x="891" y="697" class="sumText">Σ</text>
+  <text x="891" y="737" class="sumText">Σ</text>
+  <text x="891" y="777" class="sumText">Σ</text>
+  <circle cx="1040" cy="690" r="24" class="outputNode"/>
+  <circle cx="1040" cy="730" r="24" class="outputNode"/>
+  <circle cx="1040" cy="770" r="24" class="outputNode"/>
+  <text x="1024" y="696" class="nodeText">Y₃₁</text>
+  <text x="1024" y="736" class="nodeText">Y₃₂</text>
+  <text x="1024" y="776" class="nodeText">Y₃₃</text>
+
+  <!-- Edges hidden -> layer 2 sums -->
+  <path d="M678 352 C750 330, 812 320, 880 340" class="softLine"/>
+  <path d="M678 408 C750 395, 812 365, 880 340" class="softLine"/>
+  <path d="M678 352 C750 355, 812 365, 880 380" class="softLine"/>
+  <path d="M678 408 C750 405, 812 395, 880 380" class="softLine"/>
+  <path d="M678 352 C750 380, 812 415, 880 420" class="softLine"/>
+  <path d="M678 408 C750 430, 812 435, 880 420" class="softLine"/>
+
+  <path d="M678 527 C750 505, 812 495, 880 515" class="softLine"/>
+  <path d="M678 583 C750 570, 812 540, 880 515" class="softLine"/>
+  <path d="M678 527 C750 530, 812 540, 880 555" class="softLine"/>
+  <path d="M678 583 C750 580, 812 570, 880 555" class="softLine"/>
+  <path d="M678 527 C750 555, 812 590, 880 595" class="softLine"/>
+  <path d="M678 583 C750 605, 812 610, 880 595" class="softLine"/>
+
+  <path d="M678 702 C750 680, 812 670, 880 690" class="softLine"/>
+  <path d="M678 758 C750 745, 812 715, 880 690" class="softLine"/>
+  <path d="M678 702 C750 705, 812 715, 880 730" class="softLine"/>
+  <path d="M678 758 C750 755, 812 745, 880 730" class="softLine"/>
+  <path d="M678 702 C750 730, 812 765, 880 770" class="softLine"/>
+  <path d="M678 758 C750 780, 812 785, 880 770" class="softLine"/>
+
+  <text x="735" y="323" class="edgeLabel">ψ₁₁, ψ₁₂</text>
+  <text x="735" y="392" class="edgeLabel">ψ₂₁, ψ₂₂</text>
+  <text x="735" y="452" class="edgeLabel">ψ₃₁, ψ₃₂</text>
+
+  <path d="M920 340 L1016 340" class="line"/>
+  <path d="M920 380 L1016 380" class="line"/>
+  <path d="M920 420 L1016 420" class="line"/>
+  <path d="M920 515 L1016 515" class="line"/>
+  <path d="M920 555 L1016 555" class="line"/>
+  <path d="M920 595 L1016 595" class="line"/>
+  <path d="M920 690 L1016 690" class="line"/>
+  <path d="M920 730 L1016 730" class="line"/>
+  <path d="M920 770 L1016 770" class="line"/>
+
+  <!-- Output to matrix -->
+  <path d="M1064 340 C1120 340, 1160 335, 1224 345" class="line"/>
+  <path d="M1064 380 C1120 380, 1160 380, 1224 385" class="line"/>
+  <path d="M1064 420 C1120 420, 1160 425, 1224 425" class="line"/>
+  <path d="M1064 515 C1120 515, 1160 510, 1224 505" class="line"/>
+  <path d="M1064 555 C1120 555, 1160 555, 1224 545" class="line"/>
+  <path d="M1064 595 C1120 595, 1160 600, 1224 585" class="line"/>
+  <path d="M1064 690 C1120 690, 1160 685, 1224 665" class="line"/>
+  <path d="M1064 730 C1120 730, 1160 730, 1224 705" class="line"/>
+  <path d="M1064 770 C1120 770, 1160 775, 1224 745" class="line"/>
+
+  <!-- Matrix -->
+  <rect x="1230" y="330" width="74" height="40" class="matrixCell"/>
+  <rect x="1304" y="330" width="74" height="40" class="matrixCell"/>
+  <rect x="1378" y="330" width="74" height="40" class="matrixCell"/>
+  <rect x="1230" y="370" width="74" height="40" class="matrixCell"/>
+  <rect x="1304" y="370" width="74" height="40" class="matrixCell"/>
+  <rect x="1378" y="370" width="74" height="40" class="matrixCell"/>
+  <rect x="1230" y="410" width="74" height="40" class="matrixCell"/>
+  <rect x="1304" y="410" width="74" height="40" class="matrixCell"/>
+  <rect x="1378" y="410" width="74" height="40" class="matrixCell"/>
+
+  <text x="1251" y="356" class="nodeText">Y₁₁</text>
+  <text x="1325" y="356" class="nodeText">Y₁₂</text>
+  <text x="1399" y="356" class="nodeText">Y₁₃</text>
+  <text x="1251" y="396" class="nodeText">Y₂₁</text>
+  <text x="1325" y="396" class="nodeText">Y₂₂</text>
+  <text x="1399" y="396" class="nodeText">Y₂₃</text>
+  <text x="1251" y="436" class="nodeText">Y₃₁</text>
+  <text x="1325" y="436" class="nodeText">Y₃₂</text>
+  <text x="1399" y="436" class="nodeText">Y₃₃</text>
+
+  <text x="1240" y="482" class="math">Aᵢₖ = Eᵢ · Yᵢₖ,  Eᵢ = exp(-rᵢ)</text>
+  <text x="1240" y="520" class="math">Ψ = det(A)</text>
+
+  <!-- No cross-electron sum warning -->
+  <rect x="1218" y="585" width="252" height="165" rx="8" class="badBox"/>
+  <text x="1240" y="620" class="section">这里不会发生</text>
+  <line x1="1240" y1="656" x2="1450" y2="656" stroke="#d96b6b" stroke-width="4"/>
+  <line x1="1240" y1="708" x2="1450" y2="708" stroke="#d96b6b" stroke-width="4"/>
+  <text x="1248" y="650" class="math">z₁₁ + z₂₁ + z₃₁</text>
+  <text x="1248" y="702" class="math">z₁₂ + z₂₂ + z₃₂</text>
+  <text x="1240" y="735" class="small">不沿电子方向求和</text>
+
+  <!-- Shared parameter braces -->
+  <path d="M470 845 C470 870, 500 870, 500 895 L710 895 C710 870, 740 870, 740 845" class="brace"/>
+  <text x="522" y="925" class="small">三条电子通道共享同一套 φ 参数</text>
+  <path d="M825 845 C825 870, 860 870, 860 895 L1095 895 C1095 870, 1130 870, 1130 845" class="brace"/>
+  <text x="898" y="925" class="small">三条电子通道共享同一套 ψ 参数</text>
+
+  <!-- Formula strip -->
+  <rect x="60" y="850" width="360" height="92" rx="8" fill="#f6f9fc" stroke="#c7d4df" stroke-width="1.4"/>
+  <text x="82" y="884" class="math">zᵢₐ = Σₚ φₐₚ(hᵢₚ)</text>
+  <text x="82" y="920" class="math">Yᵢₖ = Σₐ ψₖₐ(zᵢₐ)</text>
+  <text x="270" y="920" class="tiny">i 不参与求和</text>
+</svg>

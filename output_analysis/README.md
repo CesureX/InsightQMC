@@ -1,7 +1,8 @@
 # QMC_LZW output analysis
 
-Tools for reading `outputs/<run>/tensorboard/events...`, exporting scalar CSV files,
-plotting training curves, and summarizing the final stable segment.
+Tools for reading `outputs/<run>/tensorboard/events...` or falling back to
+`outputs/<run>/logs/metrics.csv`, exporting scalar CSV files, plotting training
+curves, and summarizing the final stable segment.
 
 ## Usage
 
@@ -9,7 +10,7 @@ From the `QMC_LZW` directory:
 
 ```bash
 conda run -p /vepfs-mlp2/c20250516/250504030/env/qmc python output_analysis/analyze_run.py \
-  --run outputs/Li622_eeagg_ndet4_wdet_g10
+  --run outputs/Li07021024
 ```
 
 Outputs are written to `<run>/analysis/` by default:

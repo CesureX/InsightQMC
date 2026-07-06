@@ -86,6 +86,7 @@ class PretrainRunner:
     ):
         needs_pretrain = (
             self.enabled
+            and train_start_step <= t_init
             and train_opt_state is None
             and pretrain_start_step < self.preiterations
         )
