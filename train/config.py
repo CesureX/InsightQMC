@@ -1,8 +1,11 @@
+from datetime import datetime
+
 import ml_collections
 from tools.utils import system
 
 
 def default() -> ml_collections.ConfigDict:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 8192,
@@ -76,7 +79,7 @@ def default() -> ml_collections.ConfigDict:
             'orbital_head': {
                 'enabled': True,
                 # type='mkan' uses MultKAN; type='mlp' uses DenseLayer.
-                'type': 'mkan',
+                'type': 'mlp',
                 # Used when width=None. [] is a single output layer.
                 'hidden_dims': [],
                 # MKAN-only width. Use e.g. [None, [8, 4], None] for 4 multiplication nodes.
@@ -109,7 +112,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/Li07021024',
+            'root_dir': f'outputs/Li/{timestamp}',
             'checkpoint_every': 50,
             'metrics_every': 5,
             'resume': False,
