@@ -11,8 +11,8 @@ def default() -> ml_collections.ConfigDict:
         'k': [3], #7
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 20000,
-        'preiterations': 5000,
+        'iterations': 2000,
+        'preiterations': 1000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -58,7 +58,8 @@ def default() -> ml_collections.ConfigDict:
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
             # [r_ae, ae, ee_density, ee_vec] for Li when orbital_features='ee_aggregate'.
-            # The final output is 2 * ndeterminants * nelectrons real channels when
+            # With orbital_head.enabled=True, MKAN returns node features first; the
+            # selected orbital head maps those nodes to orbital channels.
             'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
             #'layer_type': 'chebyshev',
@@ -72,6 +73,21 @@ def default() -> ml_collections.ConfigDict:
             'width': [8, [8, 4], 6],
             'mult_arity': 2,
             'required_parameters': None,
+            'orbital_head': {
+                'enabled': True,
+                # type='mkan' uses MultKAN; type='mlp' uses DenseLayer.
+                'type': 'mkan',
+                # Used when width=None. [] is a single output layer.
+                'hidden_dims': [],
+                # MKAN-only width. Use e.g. [None, [8, 4], None] for 4 multiplication nodes.
+                'width': None,
+                'mult_arity': 2,
+                'layer_type': 'base',
+                'required_parameters': None,
+                'activation': 'silu',
+                'bias': True,
+                'rwf': {'mean': 1.0, 'std': 0.1},
+            },
             'pretrain_phase_weight': 1.0e-2,
             'prune_mask_checkpoint': None,
         },
