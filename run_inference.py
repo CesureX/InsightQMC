@@ -241,6 +241,15 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             ae_channels = [
                 channel for channel, spin in zip(ae_channels, electrons) if spin > 0
             ]
+            theta, phi = envelope.angular_coordinates(ae)
+            theta_channels = jnp.split(theta, spin_partitions, axis=0)
+            theta_channels = [
+                channel for channel, spin in zip(theta_channels, electrons) if spin > 0
+            ]
+            phi_channels = jnp.split(phi, spin_partitions, axis=0)
+            phi_channels = [
+                channel for channel, spin in zip(phi_channels, electrons) if spin > 0
+            ]
             envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
             if envelope_type == 'isotropic':
                 apply_envelope = envelope.apply_isotropic_envelope
@@ -250,6 +259,12 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 apply_envelope = envelope.apply_legendre_envelope
             elif envelope.is_legendre_anisotropic(envelope_type):
                 apply_envelope = envelope.apply_legendre_anisotropic_envelope
+            elif envelope.is_angular_momentum(envelope_type):
+                apply_envelope = envelope.apply_angular_momentum_envelope
+            elif envelope.is_legendre_angular(envelope_type):
+                apply_envelope = envelope.apply_legendre_angular_envelope
+            elif envelope.is_complex_angular_momentum(envelope_type):
+                apply_envelope = envelope.apply_complex_angular_momentum_envelope
             else:
                 raise ValueError(f'Unsupported envelope_type={envelope_type!r}.')
             if envelope.is_legendre_anisotropic(envelope_type):
@@ -257,6 +272,57 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     channel * apply_envelope(ae=ae_channel, **envelope_param)
                     for channel, ae_channel, envelope_param in zip(
                         orbital_channels, ae_channels, params['envelope']
+                    )
+                ]
+            elif envelope.is_angular_momentum(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        r_ae=r_ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
+                    )
+                ]
+            elif envelope.is_legendre_angular(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        r_ae=r_ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
+                    )
+                ]
+            elif envelope.is_complex_angular_momentum(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        r_ae=r_ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
                     )
                 ]
             else:

@@ -293,6 +293,19 @@ def _legendre_expr(order: int, arg: str) -> str:
     return prev1
 
 
+def _real_spherical_harmonic_symbol(index: int) -> str:
+    """Return the real spherical-harmonic label for packed index."""
+
+    cursor = 0
+    for l in range(128):
+        width = 2 * l + 1
+        if index < cursor + width:
+            m = -l + (index - cursor)
+            return f"Yreal_{l}_{m}"
+        cursor += width
+    return f"Yreal_index_{index}"
+
+
 def _bspline_basis_expr(
     basis_idx: int,
     degree: int,
@@ -1210,6 +1223,26 @@ def _envelope_payload(
             "sum_d p_basis[b,A,d,c] * P_d(tanh(rho[b,A,c])), "
             "rho[b,A,c] = ||Sigma[b,A,c] * (r_i - R_A)||"
         )
+    elif envelope.is_angular_momentum(envelope_type):
+        formula = (
+            "E_b(i,c) = sum_A exp(-sigma[b,A,c] * r_iA) * "
+            "sum_{l=0..L} sum_{m=-l..l} angular_coeff[b,A,l,m,c] * "
+            "Yreal_lm(theta_iA, phi_iA)"
+        )
+    elif envelope.is_legendre_angular(envelope_type):
+        formula = (
+            "E_b(i,c) = sum_A exp(-sigma[b,A,c] * r_iA) * "
+            "sum_d p_basis[b,A,d,c] * P_d(tanh(r_iA)) * "
+            "sum_{l=0..L} sum_{m=-l..l} angular_coeff[b,A,l,m,c] * "
+            "Yreal_lm(theta_iA, phi_iA)"
+        )
+    elif envelope.is_complex_angular_momentum(envelope_type):
+        formula = (
+            "E_b(i,c) = sum_A exp(-sigma[b,A,c] * r_iA) * "
+            "sum_{l=0..L} sum_{m=-l..l} "
+            "(angular_coeff_real[b,A,l,m,c] + i*angular_coeff_imag[b,A,l,m,c]) * "
+            "Y_lm(theta_iA, phi_iA)"
+        )
     elif envelope_type == "isotropic":
         formula = "E_b(i,c) = sum_A pi[b,A,c] * exp(-sigma[b,A,c] * r_iA)"
     else:
@@ -1307,6 +1340,109 @@ def _envelope_payload(
                             legendre_terms = ["0"]
                         atom_terms.append(
                             f"exp(-{rho_symbol})*({_sum_terms(legendre_terms)})"
+                        )
+                    definitions.append(
+                        {
+                            "symbol": f"E_{label}(a,{channel_idx})",
+                            "formula": _sum_terms(atom_terms),
+                        }
+                    )
+            elif envelope.is_angular_momentum(envelope_type):
+                sigma = np.asarray(block_params["sigma"])
+                angular_coeff = np.asarray(block_params["angular_coeff"])
+                for channel_idx in range(output_dim):
+                    atom_terms = []
+                    for atom_idx in range(sigma.shape[0]):
+                        r_symbol = f"r_{label}[a,A{atom_idx}]"
+                        theta_symbol = f"theta_{label}[a,A{atom_idx}]"
+                        phi_symbol = f"phi_{label}[a,A{atom_idx}]"
+                        angular_terms = [
+                            f"({_format_float(angular_coeff[atom_idx, basis_idx, channel_idx])})"
+                            f"*{_real_spherical_harmonic_symbol(basis_idx)}"
+                            f"({theta_symbol},{phi_symbol})"
+                            for basis_idx in range(angular_coeff.shape[1])
+                            if abs(float(angular_coeff[atom_idx, basis_idx, channel_idx])) > 0.0
+                        ]
+                        if not angular_terms:
+                            angular_terms = ["0"]
+                        atom_terms.append(
+                            f"exp(-({_format_float(sigma[atom_idx, channel_idx])})"
+                            f"*{r_symbol})*({_sum_terms(angular_terms)})"
+                        )
+                    definitions.append(
+                        {
+                            "symbol": f"E_{label}(a,{channel_idx})",
+                            "formula": _sum_terms(atom_terms),
+                        }
+                    )
+            elif envelope.is_legendre_angular(envelope_type):
+                sigma = np.asarray(block_params["sigma"])
+                p_basis = np.asarray(block_params["p_basis"])
+                angular_coeff = np.asarray(block_params["angular_coeff"])
+                for channel_idx in range(output_dim):
+                    atom_terms = []
+                    for atom_idx in range(sigma.shape[0]):
+                        r_symbol = f"r_{label}[a,A{atom_idx}]"
+                        theta_symbol = f"theta_{label}[a,A{atom_idx}]"
+                        phi_symbol = f"phi_{label}[a,A{atom_idx}]"
+                        legendre_terms = [
+                            f"({_format_float(p_basis[atom_idx, degree, channel_idx])})"
+                            f"*({_legendre_expr(degree, f'tanh({r_symbol})')})"
+                            for degree in range(p_basis.shape[1])
+                            if abs(float(p_basis[atom_idx, degree, channel_idx])) > 0.0
+                        ]
+                        if not legendre_terms:
+                            legendre_terms = ["0"]
+                        angular_terms = [
+                            f"({_format_float(angular_coeff[atom_idx, basis_idx, channel_idx])})"
+                            f"*{_real_spherical_harmonic_symbol(basis_idx)}"
+                            f"({theta_symbol},{phi_symbol})"
+                            for basis_idx in range(angular_coeff.shape[1])
+                            if abs(float(angular_coeff[atom_idx, basis_idx, channel_idx])) > 0.0
+                        ]
+                        if not angular_terms:
+                            angular_terms = ["0"]
+                        atom_terms.append(
+                            f"exp(-({_format_float(sigma[atom_idx, channel_idx])})"
+                            f"*{r_symbol})"
+                            f"*({_sum_terms(legendre_terms)})"
+                            f"*({_sum_terms(angular_terms)})"
+                        )
+                    definitions.append(
+                        {
+                            "symbol": f"E_{label}(a,{channel_idx})",
+                            "formula": _sum_terms(atom_terms),
+                        }
+                    )
+            elif envelope.is_complex_angular_momentum(envelope_type):
+                sigma = np.asarray(block_params["sigma"])
+                angular_coeff_real = np.asarray(block_params["angular_coeff_real"])
+                angular_coeff_imag = np.asarray(block_params["angular_coeff_imag"])
+                for channel_idx in range(output_dim):
+                    atom_terms = []
+                    for atom_idx in range(sigma.shape[0]):
+                        r_symbol = f"r_{label}[a,A{atom_idx}]"
+                        theta_symbol = f"theta_{label}[a,A{atom_idx}]"
+                        phi_symbol = f"phi_{label}[a,A{atom_idx}]"
+                        angular_terms = []
+                        for basis_idx in range(angular_coeff_real.shape[1]):
+                            real_value = float(angular_coeff_real[atom_idx, basis_idx, channel_idx])
+                            imag_value = float(angular_coeff_imag[atom_idx, basis_idx, channel_idx])
+                            if abs(real_value) <= 0.0 and abs(imag_value) <= 0.0:
+                                continue
+                            coeff = (
+                                f"({_format_float(real_value)}"
+                                f"+i*{_format_float(imag_value)})"
+                            )
+                            angular_terms.append(
+                                f"{coeff}*Ycomplex_{_real_spherical_harmonic_symbol(basis_idx)[6:]}"
+                                f"({theta_symbol},{phi_symbol})"
+                            )
+                        if not angular_terms:
+                            angular_terms = ["0"]
+                        atom_terms.append(
+                            f"exp(-({_format_float(sigma[atom_idx, channel_idx])})"
+                            f"*{r_symbol})*({_sum_terms(angular_terms)})"
                         )
                     definitions.append(
                         {

@@ -5,13 +5,13 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 8192,
-        'layer_dims': [8, 16, 6],
+        'batch_size': 4096,
+        'layer_dims': [8, 8, 6],
         'g': [10],
         'k': [3], #7
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 20000,
+        'iterations': 30000,
         'preiterations': 5000,
         'run_pretrain': True,
         'seed': 42,
@@ -36,7 +36,7 @@ def default() -> ml_collections.ConfigDict:
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
-        'ndeterminants': 1,
+        'ndeterminants': 4,
         'determinant_weights': True,
         'laplacian_method': 'default',
         't_init': 0,
@@ -44,10 +44,10 @@ def default() -> ml_collections.ConfigDict:
         'learning_rate': 0.00002,
         'learning_rate_decay': 50000.0,
         'gradient_clip_norm': 1.0,
-        'reset_optimizer_on_resume': True,
+        'reset_optimizer_on_resume': False,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
-        'envelope_type': 'legendre_anisotropic', # isotropic, chebyshev, legendre,legendre_anisotropic
+        'envelope_type': 'legendre_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum
         'envelope_degree': 7,
         'add_bias': True,
         'external_weights': True,
@@ -64,8 +64,8 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'fourier'
             'input_dim': None,
             'output_dim': None,
-            # [n_sum, n_mult] opens MKAN multiplication nodes in that hidden layer.
-            'width': [8, [8, 4], 6],
+            # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
+            'width': None,
             'mult_arity': 2,
             'required_parameters': None,
             'pretrain_phase_weight': 1.0e-2,
@@ -78,8 +78,8 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': 4096,
         },
         'system': {
-            'molecule': [system.Atom('Li', (0, 0, 0))],
-            'electrons': (2,1),
+            'molecule': [system.Atom('C', (0, 0, 0))],
+            'electrons': (4,2),
         },
         'jastrow': {
             'ee': True,
@@ -89,7 +89,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/Li07021024',
+            'root_dir': 'outputs/C07062001',
             'checkpoint_every': 50,
             'metrics_every': 5,
             'resume': False,
