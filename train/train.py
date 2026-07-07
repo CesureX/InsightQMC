@@ -242,6 +242,13 @@ class VMCTrainer:
         self.orbital_head_enabled = bool(orbital_head_cfg.get('enabled', False))
         self.orbital_head_type = str(orbital_head_cfg.get('type', 'dense')).lower()
         self.orbital_head_bias = bool(orbital_head_cfg.get('bias', True))
+        self.orbital_head_input_mode = str(
+            orbital_head_cfg.get('input_mode', 'per_electron')
+        ).lower()
+        if self.orbital_head_input_mode not in ('per_electron', 'all_electrons', 'global', 'flatten'):
+            raise ValueError(
+                "orbital_head.input_mode must be 'per_electron' or 'all_electrons'."
+            )
         self.orbital_head_hidden_dims = tuple(
             int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
         )
@@ -281,6 +288,16 @@ class VMCTrainer:
                 f'mkan.output_dim must be at least {self.orbital_output_dim} for '
                 'orbital MKAN wavefunctions.'
             )
+        self.orbital_head_uses_all_electrons = self.orbital_head_input_mode in (
+            'all_electrons',
+            'global',
+            'flatten',
+        )
+        self.orbital_head_input_dim = self.mkan_output_dim
+        self.orbital_head_output_dim = self.orbital_output_dim
+        if self.orbital_head_enabled and self.orbital_head_uses_all_electrons:
+            self.orbital_head_input_dim = self.nelectrons * self.mkan_output_dim
+            self.orbital_head_output_dim = self.nelectrons * self.orbital_output_dim
         self.adapt_frequency = int(cfg.get('mcmc_adapt_frequency', 20))
         self.pmove_min = float(cfg.get('mcmc_pmove_min', 0.50))
         self.pmove_max = float(cfg.get('mcmc_pmove_max', 0.60))
@@ -452,6 +469,10 @@ class VMCTrainer:
                 params['orbital_head'],
                 self._orbital_head_static_state,
             )
+            if self.orbital_head_uses_all_electrons:
+                flat_nodes = jnp.reshape(node_values, (1, self.orbital_head_input_dim))
+                flat_values = head(flat_nodes)
+                return jnp.reshape(flat_values, (self.nelectrons, self.orbital_output_dim))
             return head(node_values)
 
         def orbitals_apply(params, pos, spins, atoms, charges):
@@ -656,8 +677,8 @@ class VMCTrainer:
     def _make_orbital_head_template(self):
         if self.orbital_head_type in ('dense', 'mlp'):
             return networks.DenseOrbitalHead(
-                input_dim=self.mkan_output_dim,
-                output_dim=self.orbital_output_dim,
+                input_dim=self.orbital_head_input_dim,
+                output_dim=self.orbital_head_output_dim,
                 hidden_dims=self.orbital_head_hidden_dims,
                 activation=self.orbital_head_activation,
                 add_bias=self.orbital_head_bias,
@@ -666,8 +687,8 @@ class VMCTrainer:
             )
         if self.orbital_head_type == 'kan':
             return networks.KANOrbitalHead(
-                input_dim=self.mkan_output_dim,
-                output_dim=self.orbital_output_dim,
+                input_dim=self.orbital_head_input_dim,
+                output_dim=self.orbital_head_output_dim,
                 hidden_dims=self.orbital_head_hidden_dims,
                 layer_type=self.orbital_head_layer_type,
                 required_parameters=self._orbital_head_required_parameters(),
@@ -675,8 +696,8 @@ class VMCTrainer:
             )
         if self.orbital_head_type in ('mkan', 'multkan'):
             return networks.MKANOrbitalHead(
-                input_dim=self.mkan_output_dim,
-                output_dim=self.orbital_output_dim,
+                input_dim=self.orbital_head_input_dim,
+                output_dim=self.orbital_head_output_dim,
                 hidden_dims=self.orbital_head_hidden_dims,
                 width=self.orbital_head_width,
                 layer_type=self.orbital_head_layer_type,
@@ -1474,4 +1495,5 @@ class VMCTrainer:
 def train(cfg: ml_collections.ConfigDict):
     """Main training loop entry."""
     trainer = VMCTrainer(cfg)
+    # breakpoint()
     trainer.run()

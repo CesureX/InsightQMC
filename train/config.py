@@ -14,8 +14,8 @@ def default() -> ml_collections.ConfigDict:
         'k': [3], #7
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 2000,
-        'preiterations': 1000,
+        'iterations': 200,
+        'preiterations': 100,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -73,13 +73,17 @@ def default() -> ml_collections.ConfigDict:
             'input_dim': None,
             'output_dim': None,
             # [n_sum, n_mult] opens MKAN multiplication nodes in that hidden layer.
-            'width': [8, [8, 4], 6],
+            'width': [8, 8, 6],
             'mult_arity': 2,
             'required_parameters': None,
             'orbital_head': {
                 'enabled': True,
                 # type='mkan' uses MultKAN; type='mlp' uses DenseLayer.
                 'type': 'mlp',
+                # all_electrons flattens all electron MKAN nodes before the head.
+                # per_electron applies the head independently to each electron row.
+                'input_mode': 'all_electrons',
+                # 'input_mode': 'per_electron',
                 # Used when width=None. [] is a single output layer.
                 'hidden_dims': [],
                 # MKAN-only width. Use e.g. [None, [8, 4], None] for 4 multiplication nodes.

@@ -171,6 +171,13 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     orbital_head_cfg = mkan_cfg.get('orbital_head', cfg.get('orbital_head', {}))
     orbital_head_enabled = bool(orbital_head_cfg.get('enabled', False))
     orbital_head_type = str(orbital_head_cfg.get('type', 'dense')).lower()
+    orbital_head_input_mode = str(
+        orbital_head_cfg.get('input_mode', 'per_electron')
+    ).lower()
+    if orbital_head_input_mode not in ('per_electron', 'all_electrons', 'global', 'flatten'):
+        raise ValueError(
+            "orbital_head.input_mode must be 'per_electron' or 'all_electrons'."
+        )
     orbital_head_hidden_dims = tuple(
         int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
     )
@@ -196,6 +203,16 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         mkan_output_dim = int(
             orbital_output_dim if mkan_cfg.get('output_dim', None) is None else mkan_cfg.output_dim
         )
+    orbital_head_uses_all_electrons = orbital_head_input_mode in (
+        'all_electrons',
+        'global',
+        'flatten',
+    )
+    orbital_head_input_dim = mkan_output_dim
+    orbital_head_output_dim = orbital_output_dim
+    if orbital_head_enabled and orbital_head_uses_all_electrons:
+        orbital_head_input_dim = nelectrons * mkan_output_dim
+        orbital_head_output_dim = nelectrons * orbital_output_dim
 
     if mkan_cfg.get('width', None) is None:
         hidden_dims = [int(v) for v in np.asarray(cfg.layer_dims).reshape(-1)[1:-1]]
@@ -263,8 +280,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     if orbital_head_enabled:
         if orbital_head_type in ('dense', 'mlp'):
             head_template = networks.DenseOrbitalHead(
-                input_dim=mkan_output_dim,
-                output_dim=orbital_output_dim,
+                input_dim=orbital_head_input_dim,
+                output_dim=orbital_head_output_dim,
                 hidden_dims=orbital_head_hidden_dims,
                 activation=orbital_head_activation,
                 add_bias=orbital_head_bias,
@@ -273,8 +290,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             )
         elif orbital_head_type == 'kan':
             head_template = networks.KANOrbitalHead(
-                input_dim=mkan_output_dim,
-                output_dim=orbital_output_dim,
+                input_dim=orbital_head_input_dim,
+                output_dim=orbital_head_output_dim,
                 hidden_dims=orbital_head_hidden_dims,
                 layer_type=orbital_head_layer_type,
                 required_parameters=_kan_required_parameters_for_layer(
@@ -287,8 +304,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             )
         elif orbital_head_type in ('mkan', 'multkan'):
             head_template = networks.MKANOrbitalHead(
-                input_dim=mkan_output_dim,
-                output_dim=orbital_output_dim,
+                input_dim=orbital_head_input_dim,
+                output_dim=orbital_head_output_dim,
                 hidden_dims=orbital_head_hidden_dims,
                 width=orbital_head_width,
                 layer_type=orbital_head_layer_type,
@@ -353,6 +370,10 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             head_params,
             head_static_state,
         )
+        if orbital_head_uses_all_electrons:
+            flat_nodes = jnp.reshape(node_values, (1, orbital_head_input_dim))
+            flat_values = head(flat_nodes)
+            return jnp.reshape(flat_values, (nelectrons, orbital_output_dim))
         return head(node_values)
 
     def orbitals_apply(params, pos, spins_, atoms_, charges_):
