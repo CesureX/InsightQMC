@@ -120,13 +120,14 @@ class VMCTrainer:
             batch_size=self.batch_size,
             pretrain_mcmc_steps=self.pretrain_mcmc_steps,
             pretrain_mcmc_width=self.pretrain_mcmc_width,
+            step_jit=self.pretrain_step_jit,
             full_det=self.full_det,
             debug=self.debug,
             scalar_pretrain=False,
             phase_weight=self.mkan_pretrain_phase_weight,
-            use_pmap=self.use_pmap,
-            devices=self.devices,
-            num_devices=self.num_devices,
+            use_pmap=self.pretrain_use_pmap,
+            devices=self.pretrain_devices,
+            num_devices=self.pretrain_num_devices,
         )
 
     def _read_config(self) -> None:
@@ -168,6 +169,7 @@ class VMCTrainer:
         self.mcmc_width = float(cfg.mcmc_width)
         self.pretrain_mcmc_steps = int(cfg.get('pretrain_mcmc_steps', 1))
         self.pretrain_mcmc_width = float(cfg.get('pretrain_mcmc_width', 0.02))
+        self.pretrain_step_jit = bool(cfg.get('pretrain_step_jit', True))
 
         self.clip_local_energy = float(cfg.clip_local_energy)
         self.use_scan = bool(cfg.use_scan)
@@ -211,6 +213,26 @@ class VMCTrainer:
                 f'num_devices={self.num_devices} when multi_device is enabled.'
             )
         self.device_batch_size = self.batch_size // (self.num_devices if self.use_pmap else 1)
+
+        self.requested_pretrain_num_devices = int(cfg.get('pretrain_num_devices', 0))
+        if self.requested_pretrain_num_devices < 0:
+            raise ValueError('pretrain_num_devices must be non-negative.')
+        if self.requested_pretrain_num_devices == 0:
+            self.pretrain_num_devices = self.num_devices
+        else:
+            if self.requested_pretrain_num_devices > len(local_devices):
+                raise ValueError(
+                    f'pretrain_num_devices={self.requested_pretrain_num_devices} was requested, '
+                    f'but only {len(local_devices)} local JAX devices are available.'
+                )
+            self.pretrain_num_devices = self.requested_pretrain_num_devices
+        self.pretrain_devices = local_devices[: self.pretrain_num_devices]
+        self.pretrain_use_pmap = self.pretrain_num_devices > 1
+        if self.pretrain_use_pmap and self.batch_size % self.pretrain_num_devices != 0:
+            raise ValueError(
+                f'batch_size={self.batch_size} must be divisible by '
+                f'pretrain_num_devices={self.pretrain_num_devices} when pretraining uses pmap.'
+            )
         self.reset_optimizer_on_resume = bool(cfg.get('reset_optimizer_on_resume', False))
         self.resize_resumed_noise = float(cfg.get('resize_resumed_noise', 0.0))
         self.preiterations = int(cfg.preiterations)

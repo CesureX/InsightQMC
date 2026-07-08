@@ -1,18 +1,21 @@
+from datetime import datetime
+
 import ml_collections
 from tools.utils import system
 
 
 def default() -> ml_collections.ConfigDict:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 8192,
+        'batch_size': 49152,
         'layer_dims': [8, 8, 8, 6],
         'g': [10],
         'k': [3], #7
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 30000,
-        'preiterations': 5000,
+        'iterations': 2000,
+        'preiterations': 1000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -32,6 +35,7 @@ def default() -> ml_collections.ConfigDict:
         'mcmc_width': 0.05,
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
+        'pretrain_step_jit': True,
         'clip_local_energy': 5.0,
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
@@ -48,6 +52,9 @@ def default() -> ml_collections.ConfigDict:
         # 0 means use all local JAX devices. batch_size is the global batch and
         # must be divisible by the number of devices used.
         'num_devices': 0,
+        # 1 keeps HF/DFT pretraining on a single visible device; 0 follows
+        # num_devices so pretraining uses the same devices as VMC training.
+        'pretrain_num_devices': 1,
         'reset_optimizer_on_resume': False,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
@@ -113,7 +120,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/Li07081229_with_M',
+            'root_dir': f'outputs/Li/{timestamp}',
             'checkpoint_every': 50,
             'metrics_every': 5,
             'resume': False,

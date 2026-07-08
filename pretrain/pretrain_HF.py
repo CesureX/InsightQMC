@@ -295,6 +295,7 @@ def pretrain_hartree_fock(
     use_pmap: bool = False,
     devices=None,
     num_devices: int = 1,
+    step_jit: bool = True,
 ):
   """Performs training to match initialization as closely as possible to HF."""
   optimizer = optax.adam(3.e-4)
@@ -321,6 +322,8 @@ def pretrain_hartree_fock(
         out_axes=(multi_device.DATA_IN_AXES, 0, 0, 0),
         devices=devices,
     )
+  elif step_jit:
+    pretrain_step = jax.jit(pretrain_step, static_argnums=4)
 
   if data is None:
     data = networks.KANetsData(
