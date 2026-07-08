@@ -66,6 +66,13 @@ def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
     return tuple(default)
 
 
+def _mkan_width_output_dim(width) -> int:
+    last = list(width)[-1]
+    if isinstance(last, (list, tuple)):
+        return int(last[0]) + int(last[1])
+    return int(last)
+
+
 def _merge_static_state_with_template(template_state, checkpoint_state):
     if checkpoint_state is None:
         return template_state
@@ -91,12 +98,29 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
     layer_type = str(mkan_cfg.get("layer_type", "spline")).lower()
     orbital_feature_mode = str(cfg.get("orbital_features", "one_body")).lower()
     mkan_input_dim = int(nfeatures if mkan_cfg.get("input_dim", None) is None else mkan_cfg.input_dim)
-    output_default = (
+    orbital_output_dim = (
         (2 * ndeterminants * nelectrons)
         if bool(cfg.complex_output)
         else (ndeterminants * nelectrons)
     )
-    mkan_output_dim = int(output_default if mkan_cfg.get("output_dim", None) is None else mkan_cfg.output_dim)
+    orbital_head_cfg = mkan_cfg.get("orbital_head", cfg.get("orbital_head", {}))
+    orbital_head_enabled = bool(orbital_head_cfg.get("enabled", False))
+    orbital_head_type = str(orbital_head_cfg.get("type", "dense")).lower()
+    if orbital_head_enabled:
+        if mkan_cfg.get("output_dim", None) is None:
+            if mkan_cfg.get("width", None) is not None:
+                mkan_output_dim = _mkan_width_output_dim(mkan_cfg.width)
+            else:
+                layer_dims = np.asarray(cfg.layer_dims).reshape(-1)
+                mkan_output_dim = int(
+                    layer_dims[-1] if layer_dims.size else orbital_output_dim
+                )
+        else:
+            mkan_output_dim = int(mkan_cfg.output_dim)
+    else:
+        mkan_output_dim = int(
+            orbital_output_dim if mkan_cfg.get("output_dim", None) is None else mkan_cfg.output_dim
+        )
 
     if mkan_cfg.get("width", None) is None:
         hidden_dims = [int(v) for v in np.asarray(cfg.layer_dims).reshape(-1)[1:-1]]
@@ -156,6 +180,10 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
         "electrons": electrons,
         "natoms": len(molecule),
         "input_dim": mkan_input_dim,
+        "output_dim": mkan_output_dim,
+        "orbital_output_dim": orbital_output_dim,
+        "orbital_head_enabled": orbital_head_enabled,
+        "orbital_head_type": orbital_head_type,
         "orbital_feature_mode": orbital_feature_mode,
         "ndeterminants": ndeterminants,
     }

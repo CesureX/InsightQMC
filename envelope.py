@@ -31,6 +31,16 @@ COMPLEX_ANGULAR_MOMENTUM_TYPES = frozenset(
         "complex_spherical_harmonics",
     )
 )
+FERMINET_ANGULAR_TYPES = frozenset(
+    (
+        "ferminet_angular",
+        "ferminet_angular_momentum",
+        "ferminet_spherical_harmonic",
+        "ferminet_spherical_harmonics",
+        "anisotropic_angular",
+        "anisotropic_angular_momentum",
+    )
+)
 
 
 def is_legendre_anisotropic(envelope_type: str) -> bool:
@@ -55,6 +65,12 @@ def is_complex_angular_momentum(envelope_type: str) -> bool:
     """Return whether an envelope type names the complex angular envelope."""
 
     return str(envelope_type).lower() in COMPLEX_ANGULAR_MOMENTUM_TYPES
+
+
+def is_ferminet_angular(envelope_type: str) -> bool:
+    """Return whether an envelope type names the FermiNet-style angular envelope."""
+
+    return str(envelope_type).lower() in FERMINET_ANGULAR_TYPES
 
 
 def init_isotropic_envelope(natom: int, output_dims: Sequence[int]) -> list[dict[str, Array]]:
@@ -509,3 +525,61 @@ def apply_complex_angular_momentum_envelope(
     angular_modulation = jnp.einsum("nab,abo->nao", angular_basis, angular_coeff)
     isotropic_decay = jnp.exp(-r_ae * sigma)
     return jnp.sum(isotropic_decay * angular_modulation, axis=1)
+
+
+def init_ferminet_angular_envelope(
+    natom: int,
+    output_dims: Sequence[int],
+    degree: int = 3,
+    ndim: int = 3,
+) -> list[dict[str, Array]]:
+    """Initialize FermiNet-style anisotropic angular envelope parameters.
+
+    This represents a learnable FermiNet ``pi`` weight times an anisotropic
+    exponential decay matrix and a real spherical-harmonic angular sum:
+    pi * exp(-|Sigma (r - R)|) * sum_lm c_lm Y_lm(theta, phi).
+    """
+
+    angular_basis_count = (degree + 1) ** 2
+    y00_inverse = math.sqrt(4.0 * math.pi)
+    eye = jnp.eye(ndim)
+    return [
+        {
+            "pi": jnp.ones((natom, int(output_dim))),
+            "sigma": jnp.broadcast_to(
+                eye[None, None, :, :],
+                (natom, int(output_dim), ndim, ndim),
+            ),
+            "angular_coeff": jnp.concatenate(
+                [
+                    y00_inverse * jnp.ones((natom, 1, int(output_dim))),
+                    jnp.zeros((natom, angular_basis_count - 1, int(output_dim))),
+                ],
+                axis=1,
+            ),
+        }
+        for output_dim in output_dims
+    ]
+
+
+def apply_ferminet_angular_envelope(
+    *,
+    ae: Array,
+    theta: Array,
+    phi: Array,
+    pi: Array,
+    sigma: Array,
+    angular_coeff: Array,
+) -> Array:
+    """Evaluate pi * exp(-|Sigma ae|) times a real angular-momentum sum."""
+
+    transformed = jnp.einsum("nai,aoij->naoj", ae, sigma)
+    anisotropic_radius = jnp.linalg.norm(transformed, axis=-1)
+
+    angular_basis_count = int(angular_coeff.shape[1])
+    angular_degree = int(round(math.sqrt(angular_basis_count))) - 1
+    angular_basis = _real_spherical_harmonic_basis(theta, phi, angular_degree)
+    angular_modulation = jnp.einsum("nab,abo->nao", angular_basis, angular_coeff)
+
+    anisotropic_decay = jnp.exp(-anisotropic_radius)
+    return jnp.sum(pi * anisotropic_decay * angular_modulation, axis=1)

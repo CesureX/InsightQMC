@@ -55,6 +55,13 @@ def _array_partitions(sizes):
     return list(np.cumsum(tuple(int(size) for size in sizes)))[:-1]
 
 
+def _mkan_width_output_dim(width) -> int:
+    last = list(width)[-1]
+    if isinstance(last, (list, tuple)):
+        return int(last[0]) + int(last[1])
+    return int(last)
+
+
 def _merge_static_state_with_template(template_state, checkpoint_state):
     if checkpoint_state is None:
         return template_state
@@ -88,6 +95,8 @@ class VMCTrainer:
         self.cfg = cfg
         self._mkan_graphdef = None
         self._mkan_static_state = None
+        self._orbital_head_graphdef = None
+        self._orbital_head_static_state = None
         self.run_manager = RunManager(cfg.output)
         self.run_manager.save_config(cfg)
         self._read_config()
@@ -231,25 +240,74 @@ class VMCTrainer:
         self.mkan_prune_mask_checkpoint = mkan_cfg.get('prune_mask_checkpoint', None)
         mkan_input_dim = mkan_cfg.get('input_dim', None)
         mkan_output_dim = mkan_cfg.get('output_dim', None)
-        self.mkan_input_dim = int(nfeatures if mkan_input_dim is None else mkan_input_dim)
-        self.mkan_output_dim = int(
-            (
-                (2 * self.ndeterminants * self.nelectrons)
-                if self.complex_output
-                else (self.ndeterminants * self.nelectrons)
+        orbital_head_cfg = mkan_cfg.get('orbital_head', cfg.get('orbital_head', {}))
+        self.orbital_head_enabled = bool(orbital_head_cfg.get('enabled', False))
+        self.orbital_head_type = str(orbital_head_cfg.get('type', 'dense')).lower()
+        self.orbital_head_bias = bool(orbital_head_cfg.get('bias', True))
+        self.orbital_head_input_mode = str(
+            orbital_head_cfg.get('input_mode', 'shared_rows')
+        ).lower()
+        if self.orbital_head_input_mode not in (
+            'shared_rows',
+            'all_electrons',
+            'global',
+            'flatten',
+        ):
+            raise ValueError(
+                "orbital_head.input_mode must be 'shared_rows', 'all_electrons', "
+                "'global', or 'flatten'."
             )
-            if mkan_output_dim is None else mkan_output_dim
+        self.orbital_head_hidden_dims = tuple(
+            int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
         )
-        min_output_dim = (
+        self.orbital_head_width = orbital_head_cfg.get('width', None)
+        self.orbital_head_activation = str(orbital_head_cfg.get('activation', 'silu')).lower()
+        self.orbital_head_rwf = orbital_head_cfg.get('rwf', None)
+        self.orbital_head_layer_type = str(
+            orbital_head_cfg.get('layer_type', self.mkan_layer_type)
+        ).lower()
+        self.orbital_head_required_parameters = orbital_head_cfg.get('required_parameters', None)
+        self.orbital_head_mult_arity = orbital_head_cfg.get('mult_arity', self.mkan_mult_arity)
+        self.mkan_input_dim = int(nfeatures if mkan_input_dim is None else mkan_input_dim)
+        self.orbital_output_dim = (
             (2 * self.ndeterminants * self.nelectrons)
             if self.complex_output
             else (self.ndeterminants * self.nelectrons)
         )
-        if self.mkan_output_dim < min_output_dim:
+        if self.orbital_head_enabled:
+            if mkan_output_dim is None:
+                if self.mkan_width is not None:
+                    self.mkan_output_dim = _mkan_width_output_dim(self.mkan_width)
+                else:
+                    layer_dims = np.asarray(cfg.layer_dims).reshape(-1)
+                    self.mkan_output_dim = int(
+                        layer_dims[-1] if layer_dims.size else self.orbital_output_dim
+                    )
+            else:
+                self.mkan_output_dim = int(mkan_output_dim)
+            if self.mkan_output_dim <= 0:
+                raise ValueError('mkan.output_dim must be positive when orbital_head is enabled.')
+        else:
+            self.mkan_output_dim = int(
+                self.orbital_output_dim if mkan_output_dim is None else mkan_output_dim
+            )
+        if not self.orbital_head_enabled and self.mkan_output_dim < self.orbital_output_dim:
             raise ValueError(
-                f'mkan.output_dim must be at least {min_output_dim} for '
+                f'mkan.output_dim must be at least {self.orbital_output_dim} for '
                 'orbital MKAN wavefunctions.'
             )
+        self.orbital_head_uses_all_electrons = self.orbital_head_input_mode == 'all_electrons'
+        self.orbital_head_uses_flattened_electrons = self.orbital_head_input_mode in (
+            'global',
+            'flatten',
+        )
+        self.orbital_head_input_dim = self.mkan_output_dim
+        self.orbital_head_output_dim = self.orbital_output_dim
+        if self.orbital_head_enabled and self.orbital_head_uses_all_electrons:
+            self.orbital_head_input_dim = 4 * self.mkan_output_dim
+        elif self.orbital_head_enabled and self.orbital_head_uses_flattened_electrons:
+            self.orbital_head_input_dim = self.nelectrons * self.mkan_output_dim
+            self.orbital_head_output_dim = self.nelectrons * self.orbital_output_dim
         self.adapt_frequency = int(cfg.get('mcmc_adapt_frequency', 20))
         self.pmove_min = float(cfg.get('mcmc_pmove_min', 0.50))
         self.pmove_max = float(cfg.get('mcmc_pmove_max', 0.60))
@@ -294,6 +352,7 @@ class VMCTrainer:
             'pretrain_opt_state': pretrain_opt_state,
             'train_opt_state': train_opt_state,
             'mkan_static_state': self._mkan_static_state,
+            'orbital_head_static_state': self._orbital_head_static_state,
         }
 
     def _build_networks(self):
@@ -301,6 +360,14 @@ class VMCTrainer:
         self._mkan_graphdef, initial_params, self._mkan_static_state = nnx.split(
             model_template, nnx.Param, ...
         )
+        initial_head_params = None
+        if self.orbital_head_enabled:
+            head_template = self._make_orbital_head_template()
+            (
+                self._orbital_head_graphdef,
+                initial_head_params,
+                self._orbital_head_static_state,
+            ) = nnx.split(head_template, nnx.Param, ...)
         if self.mkan_prune_mask_checkpoint:
             mask_checkpoint_path = Path(str(self.mkan_prune_mask_checkpoint)).expanduser()
             with mask_checkpoint_path.open('rb') as handle:
@@ -362,6 +429,13 @@ class VMCTrainer:
                     envelope_output_dims,
                     degree=self.envelope_degree,
                 )
+            elif envelope.is_ferminet_angular(self.envelope_type):
+                envelope_params = envelope.init_ferminet_angular_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                    ndim=3,
+                )
             else:
                 raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
         if self.jastrow_type == 'pade':
@@ -397,6 +471,8 @@ class VMCTrainer:
         def kan_init(key):
             del key
             params = {'mkan': initial_params}
+            if self.orbital_head_enabled:
+                params['orbital_head'] = initial_head_params
             if self.use_determinant_weights and self.ndeterminants > 1:
                 params['det_weights'] = jnp.ones((self.ndeterminants, 1)) / self.ndeterminants
             if envelope_params is not None:
@@ -415,8 +491,64 @@ class VMCTrainer:
                     f'MKAN input dimension mismatch: got {features.shape[-1]}, '
                     f'expected {self.mkan_input_dim}. Set cfg.mkan.input_dim '
                     'or cfg.mkan.width if you want a different feature size.'
-                )
+            )
             return model(features)
+
+        def all_electron_head_inputs(node_values):
+            global_mean = jnp.mean(node_values, axis=0, keepdims=True)
+            contexts = []
+            spin_slices = []
+            start = 0
+            for spin in self.electrons:
+                stop = start + int(spin)
+                if stop > start:
+                    spin_slices.append((start, stop))
+                start = stop
+
+            for index, (start, stop) in enumerate(spin_slices):
+                local_nodes = node_values[start:stop]
+                same_mean = jnp.mean(local_nodes, axis=0, keepdims=True)
+                opposite_parts = [
+                    node_values[other_start:other_stop]
+                    for other_index, (other_start, other_stop) in enumerate(spin_slices)
+                    if other_index != index
+                ]
+                if opposite_parts:
+                    opposite_nodes = jnp.concatenate(opposite_parts, axis=0)
+                    opposite_mean = jnp.mean(opposite_nodes, axis=0, keepdims=True)
+                else:
+                    opposite_mean = jnp.zeros_like(same_mean)
+                row_count = stop - start
+                contexts.append(
+                    jnp.concatenate(
+                        [
+                            local_nodes,
+                            jnp.broadcast_to(global_mean, (row_count, self.mkan_output_dim)),
+                            jnp.broadcast_to(same_mean, (row_count, self.mkan_output_dim)),
+                            jnp.broadcast_to(opposite_mean, (row_count, self.mkan_output_dim)),
+                        ],
+                        axis=-1,
+                    )
+                )
+            return jnp.concatenate(contexts, axis=0)
+
+        def apply_orbital_head(params, node_values):
+            if not self.orbital_head_enabled:
+                return node_values
+            if not (isinstance(params, dict) and 'orbital_head' in params):
+                raise ValueError('Missing orbital_head parameters.')
+            head = nnx.merge(
+                self._orbital_head_graphdef,
+                params['orbital_head'],
+                self._orbital_head_static_state,
+            )
+            if self.orbital_head_uses_all_electrons:
+                return head(all_electron_head_inputs(node_values))
+            if self.orbital_head_uses_flattened_electrons:
+                flat_nodes = jnp.reshape(node_values, (1, self.orbital_head_input_dim))
+                flat_values = head(flat_nodes)
+                return jnp.reshape(flat_values, (self.nelectrons, self.orbital_output_dim))
+            return head(node_values)
 
         def orbitals_apply(params, pos, spins, atoms, charges):
             del spins, charges
@@ -428,7 +560,8 @@ class VMCTrainer:
                 r_ee,
                 feature_mode=self.orbital_feature_mode,
             )
-            orbital_values = apply_mkan(params, h_one)
+            mkan_nodes = apply_mkan(params, h_one)
+            orbital_values = apply_orbital_head(params, mkan_nodes)
             if self.complex_output:
                 real_channel_count = 2 * self.ndeterminants * self.nelectrons
                 orbital_values = (
@@ -492,6 +625,8 @@ class VMCTrainer:
                     apply_envelope = envelope.apply_legendre_angular_envelope
                 elif envelope.is_complex_angular_momentum(self.envelope_type):
                     apply_envelope = envelope.apply_complex_angular_momentum_envelope
+                elif envelope.is_ferminet_angular(self.envelope_type):
+                    apply_envelope = envelope.apply_ferminet_angular_envelope
                 else:
                     raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
                 if envelope.is_legendre_anisotropic(self.envelope_type):
@@ -547,6 +682,23 @@ class VMCTrainer:
                         for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
+                            theta_channels,
+                            phi_channels,
+                            params['envelope'],
+                        )
+                    ]
+                elif envelope.is_ferminet_angular(self.envelope_type):
+                    orbital_channels = [
+                        channel
+                        * apply_envelope(
+                            ae=ae_channel,
+                            theta=theta_channel,
+                            phi=phi_channel,
+                            **envelope_param,
+                        )
+                        for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                            orbital_channels,
+                            ae_channels,
                             theta_channels,
                             phi_channels,
                             params['envelope'],
@@ -721,6 +873,82 @@ class VMCTrainer:
             }
         raise ValueError(f'Unsupported MKAN layer_type: {self.mkan_layer_type}')
 
+    def _make_orbital_head_template(self):
+        if self.orbital_head_type in ('dense', 'mlp'):
+            return networks.DenseOrbitalHead(
+                input_dim=self.orbital_head_input_dim,
+                output_dim=self.orbital_head_output_dim,
+                hidden_dims=self.orbital_head_hidden_dims,
+                activation=self.orbital_head_activation,
+                add_bias=self.orbital_head_bias,
+                rwf=self.orbital_head_rwf,
+                seed=self.seed + 7919,
+            )
+        if self.orbital_head_type == 'kan':
+            return networks.KANOrbitalHead(
+                input_dim=self.orbital_head_input_dim,
+                output_dim=self.orbital_head_output_dim,
+                hidden_dims=self.orbital_head_hidden_dims,
+                layer_type=self.orbital_head_layer_type,
+                required_parameters=self._orbital_head_required_parameters(),
+                seed=self.seed + 7919,
+            )
+        if self.orbital_head_type in ('mkan', 'multkan'):
+            return networks.MKANOrbitalHead(
+                input_dim=self.orbital_head_input_dim,
+                output_dim=self.orbital_head_output_dim,
+                hidden_dims=self.orbital_head_hidden_dims,
+                width=self.orbital_head_width,
+                layer_type=self.orbital_head_layer_type,
+                required_parameters=self._orbital_head_required_parameters(),
+                mult_arity=self.orbital_head_mult_arity,
+                seed=self.seed + 7919,
+            )
+        raise ValueError(
+            f"Unsupported orbital_head.type={self.orbital_head_type!r}. "
+            "Expected 'mlp', 'dense', 'kan', or 'mkan'."
+        )
+
+    def _orbital_head_required_parameters(self):
+        if self.orbital_head_required_parameters is not None:
+            return dict(self.orbital_head_required_parameters)
+
+        layer_type = self.orbital_head_layer_type
+        if layer_type in ('chebyshev', 'legendre'):
+            return {
+                'D': _first_int(self.k, 3),
+                'flavor': 'exact' if layer_type == 'chebyshev' else None,
+                'external_weights': self.external_weights,
+                'add_bias': self.orbital_head_bias,
+            }
+        if layer_type in ('base', 'spline'):
+            return {
+                'k': _first_int(self.k, 3),
+                'G': _first_int(self.g, 5),
+                'grid_range': _first_grid_range(self.grid_range),
+                'external_weights': self.external_weights,
+                'add_bias': self.orbital_head_bias,
+            }
+        if layer_type == 'rbf':
+            return {
+                'D': _first_int(self.k, 5),
+                'grid_range': _first_grid_range(self.grid_range, default=(-2.0, 2.0)),
+                'external_weights': self.external_weights,
+                'add_bias': self.orbital_head_bias,
+            }
+        if layer_type == 'sine':
+            return {
+                'D': _first_int(self.k, 5),
+                'external_weights': self.external_weights,
+                'add_bias': self.orbital_head_bias,
+            }
+        if layer_type == 'fourier':
+            return {
+                'D': _first_int(self.k, 5),
+                'add_bias': self.orbital_head_bias,
+            }
+        raise ValueError(f'Unsupported orbital_head.layer_type: {layer_type}')
+
     def _initialize_params_and_data(self, kan_init):
         resume_state = self.run_manager.load_last_checkpoint()
 
@@ -750,6 +978,11 @@ class VMCTrainer:
                 self._mkan_static_state = _merge_static_state_with_template(
                     self._mkan_static_state,
                     resume_state['mkan_static_state'],
+                )
+            if resume_state.get('orbital_head_static_state') is not None:
+                self._orbital_head_static_state = _merge_static_state_with_template(
+                    self._orbital_head_static_state,
+                    resume_state['orbital_head_static_state'],
                 )
             stage = resume_state.get('stage')
             if stage == 'pretrain':
@@ -788,6 +1021,12 @@ class VMCTrainer:
         if target_params is not None and isinstance(target_params, dict):
             new_params, did_prepare = self._prepare_resumed_mkan(new_params, target_params)
             changed = changed or did_prepare
+            if self.orbital_head_enabled:
+                new_params, did_prepare = self._prepare_resumed_orbital_head(
+                    new_params,
+                    target_params,
+                )
+                changed = changed or did_prepare
 
         if self.use_determinant_weights and self.ndeterminants > 1:
             new_params, did_prepare = self._prepare_resumed_det_weights(new_params)
@@ -848,6 +1087,11 @@ class VMCTrainer:
 
         new_params = dict(params)
         target_mkan = target_params['mkan']
+        if self.orbital_head_enabled:
+            self._copy_state_overlap(params['mkan'], target_mkan)
+            new_params['mkan'] = target_mkan
+            return new_params, True
+
         self._copy_mkan_state_overlap(
             params['mkan'],
             target_mkan,
@@ -856,6 +1100,49 @@ class VMCTrainer:
         )
         new_params['mkan'] = target_mkan
         return new_params, True
+
+    def _prepare_resumed_orbital_head(self, params, target_params):
+        if 'orbital_head' not in target_params:
+            return params, False
+        if 'orbital_head' not in params:
+            new_params = dict(params)
+            new_params['orbital_head'] = target_params['orbital_head']
+            return new_params, True
+
+        if self._state_shape_signature(params['orbital_head']) == self._state_shape_signature(
+            target_params['orbital_head']
+        ):
+            return params, False
+
+        target_head = target_params['orbital_head']
+        self._copy_state_overlap(params['orbital_head'], target_head)
+        new_params = dict(params)
+        new_params['orbital_head'] = target_head
+        return new_params, True
+
+    @classmethod
+    def _state_shape_signature(cls, state):
+        try:
+            flat = dict(state.flat_state())
+        except AttributeError:
+            if hasattr(state, 'keys'):
+                items = []
+                for key in sorted(state.keys()):
+                    items.extend(
+                        (f'{key}/{path}', shape)
+                        for path, shape in cls._state_shape_signature(state[key])
+                    )
+                return tuple(items)
+            value = getattr(state, 'value', state)
+            shape = tuple(value.shape) if hasattr(value, 'shape') else ()
+            return (('', shape),)
+
+        signature = []
+        for path, value in sorted(flat.items(), key=lambda item: str(item[0])):
+            param_value = getattr(value, 'value', value)
+            shape = tuple(param_value.shape) if hasattr(param_value, 'shape') else ()
+            signature.append((str(path), shape))
+        return tuple(signature)
 
     @staticmethod
     def _mkan_state_output_dim(state):
@@ -1018,6 +1305,13 @@ class VMCTrainer:
                 self.natoms,
                 output_dims,
                 degree=self.envelope_degree,
+            )
+        if envelope.is_ferminet_angular(self.envelope_type):
+            return envelope.init_ferminet_angular_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+                ndim=3,
             )
         return None
 

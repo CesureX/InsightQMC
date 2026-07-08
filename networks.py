@@ -7,6 +7,12 @@ from typing import Any, Iterable, MutableMapping, Optional, Sequence, Union
 
 import chex
 import jax.numpy as jnp
+from flax import nnx
+
+from jkan.layers.Dense import DenseLayer
+from jkan.models.KAN import KAN
+from jkan.models.MKAN import MultKAN
+from jkan.models.utils import get_activation
 
 
 Array = jnp.ndarray
@@ -19,6 +25,119 @@ class KANetsData:
     spins: Any
     atoms: Any
     charges: Any
+
+
+class DenseOrbitalHead(nnx.Module):
+    """Dense/MLP map from MKAN nodes to orbital channels."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        hidden_dims: Sequence[int] = (),
+        activation: str = "silu",
+        add_bias: bool = True,
+        rwf: Optional[dict[str, float]] = None,
+        seed: int = 42,
+    ):
+        dims = [int(input_dim), *[int(dim) for dim in hidden_dims], int(output_dim)]
+        if any(dim <= 0 for dim in dims):
+            raise ValueError("Orbital head dimensions must be positive.")
+
+        activation_fn = get_activation(activation)
+        dense_kwargs = {"add_bias": bool(add_bias)}
+        if rwf is not None:
+            dense_kwargs["RWF"] = dict(rwf)
+
+        self.width = tuple(dims)
+        self.activation_name = str(activation)
+        self.layers = nnx.List(
+            [
+                DenseLayer(
+                    n_in=dims[idx],
+                    n_out=dims[idx + 1],
+                    activation=activation_fn if idx < len(dims) - 2 else None,
+                    seed=int(seed) + idx,
+                    **dense_kwargs,
+                )
+                for idx in range(len(dims) - 1)
+            ]
+        )
+
+    def __call__(self, nodes: Array) -> Array:
+        x = nodes
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class KANOrbitalHead(nnx.Module):
+    """KAN map from MKAN nodes to orbital channels."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        hidden_dims: Sequence[int] = (),
+        layer_type: str = "base",
+        required_parameters: Optional[dict] = None,
+        seed: int = 42,
+    ):
+        dims = [int(input_dim), *[int(dim) for dim in hidden_dims], int(output_dim)]
+        if any(dim <= 0 for dim in dims):
+            raise ValueError("Orbital head dimensions must be positive.")
+
+        self.width = tuple(dims)
+        self.layer_type = str(layer_type).lower()
+        self.model = KAN(
+            layer_dims=dims,
+            layer_type=self.layer_type,
+            required_parameters=dict(required_parameters or {}),
+            seed=int(seed),
+        )
+
+    def __call__(self, nodes: Array) -> Array:
+        return self.model(nodes)
+
+
+class MKANOrbitalHead(nnx.Module):
+    """MultKAN map from MKAN nodes to orbital channels."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        hidden_dims: Sequence[int] = (),
+        width: Optional[Sequence[Union[int, Sequence[int]]]] = None,
+        layer_type: str = "base",
+        required_parameters: Optional[dict] = None,
+        mult_arity: Union[int, Sequence[Sequence[int]]] = 2,
+        seed: int = 42,
+    ):
+        if width is None:
+            head_width = [int(input_dim), *[int(dim) for dim in hidden_dims], int(output_dim)]
+        else:
+            head_width = list(width)
+            if len(head_width) < 2:
+                raise ValueError("MKAN orbital head width must include input and output entries.")
+            head_width[0] = int(input_dim)
+            head_width[-1] = int(output_dim)
+
+        self.width = tuple(head_width)
+        self.layer_type = str(layer_type).lower()
+        self.model = MultKAN(
+            width=head_width,
+            layer_type=self.layer_type,
+            required_parameters=dict(required_parameters or {}),
+            mult_arity=mult_arity,
+            seed=int(seed),
+        )
+
+    def __call__(self, nodes: Array) -> Array:
+        return self.model(nodes)
 
 
 def construct_input_features(

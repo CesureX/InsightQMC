@@ -67,8 +67,67 @@ def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
     return tuple(default)
 
 
+def _kan_required_parameters_for_layer(
+    cfg: ml_collections.ConfigDict,
+    layer_type: str,
+    required_parameters,
+    *,
+    add_bias: bool | None = None,
+    external_weights: bool | None = None,
+):
+    if required_parameters is not None:
+        return dict(required_parameters)
+
+    use_bias = bool(cfg.add_bias) if add_bias is None else bool(add_bias)
+    use_external_weights = (
+        bool(cfg.external_weights) if external_weights is None else bool(external_weights)
+    )
+    layer_type = str(layer_type).lower()
+    if layer_type in ('chebyshev', 'legendre'):
+        return {
+            'D': _first_int(cfg.k, 3),
+            'flavor': 'exact' if layer_type == 'chebyshev' else None,
+            'external_weights': use_external_weights,
+            'add_bias': use_bias,
+        }
+    if layer_type in ('base', 'spline'):
+        return {
+            'k': _first_int(cfg.k, 3),
+            'G': _first_int(cfg.g, 5),
+            'grid_range': _first_grid_range(cfg.grid_range),
+            'external_weights': use_external_weights,
+            'add_bias': use_bias,
+        }
+    if layer_type == 'rbf':
+        return {
+            'D': _first_int(cfg.k, 5),
+            'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
+            'external_weights': use_external_weights,
+            'add_bias': use_bias,
+        }
+    if layer_type == 'sine':
+        return {
+            'D': _first_int(cfg.k, 5),
+            'external_weights': use_external_weights,
+            'add_bias': use_bias,
+        }
+    if layer_type == 'fourier':
+        return {
+            'D': _first_int(cfg.k, 5),
+            'add_bias': use_bias,
+        }
+    raise ValueError(f'Unsupported KAN layer_type: {layer_type}')
+
+
 def _array_partitions(sizes):
     return list(np.cumsum(tuple(int(size) for size in sizes)))[:-1]
+
+
+def _mkan_width_output_dim(width) -> int:
+    last = list(width)[-1]
+    if isinstance(last, (list, tuple)):
+        return int(last[0]) + int(last[1])
+    return int(last)
 
 
 def _merge_static_state_with_template(template_state, checkpoint_state):
@@ -103,12 +162,64 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     mkan_cfg = cfg.get('mkan', {})
     layer_type = str(mkan_cfg.get('layer_type', 'spline')).lower()
     mkan_input_dim = int(nfeatures if mkan_cfg.get('input_dim', None) is None else mkan_cfg.input_dim)
-    output_default = (
+    orbital_output_dim = (
         (2 * ndeterminants * nelectrons)
         if bool(cfg.complex_output)
         else (ndeterminants * nelectrons)
     )
-    mkan_output_dim = int(output_default if mkan_cfg.get('output_dim', None) is None else mkan_cfg.output_dim)
+    orbital_head_cfg = mkan_cfg.get('orbital_head', cfg.get('orbital_head', {}))
+    orbital_head_enabled = bool(orbital_head_cfg.get('enabled', False))
+    orbital_head_type = str(orbital_head_cfg.get('type', 'dense')).lower()
+    orbital_head_input_mode = str(
+        orbital_head_cfg.get('input_mode', 'shared_rows')
+    ).lower()
+    if orbital_head_input_mode not in (
+        'shared_rows',
+        'all_electrons',
+        'global',
+        'flatten',
+    ):
+        raise ValueError(
+            "orbital_head.input_mode must be 'shared_rows', 'all_electrons', "
+            "'global', or 'flatten'."
+        )
+    orbital_head_hidden_dims = tuple(
+        int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
+    )
+    orbital_head_width = orbital_head_cfg.get('width', None)
+    orbital_head_activation = str(orbital_head_cfg.get('activation', 'silu')).lower()
+    orbital_head_bias = bool(orbital_head_cfg.get('bias', True))
+    orbital_head_rwf = orbital_head_cfg.get('rwf', None)
+    orbital_head_layer_type = str(orbital_head_cfg.get('layer_type', layer_type)).lower()
+    orbital_head_required_parameters = orbital_head_cfg.get('required_parameters', None)
+    orbital_head_mult_arity = orbital_head_cfg.get('mult_arity', mkan_cfg.get('mult_arity', 2))
+    if orbital_head_enabled:
+        if mkan_cfg.get('output_dim', None) is None:
+            if mkan_cfg.get('width', None) is not None:
+                mkan_output_dim = _mkan_width_output_dim(mkan_cfg.width)
+            else:
+                layer_dims = np.asarray(cfg.layer_dims).reshape(-1)
+                mkan_output_dim = int(
+                    layer_dims[-1] if layer_dims.size else orbital_output_dim
+                )
+        else:
+            mkan_output_dim = int(mkan_cfg.output_dim)
+    else:
+        mkan_output_dim = int(
+            orbital_output_dim if mkan_cfg.get('output_dim', None) is None else mkan_cfg.output_dim
+        )
+    orbital_head_uses_all_electrons = orbital_head_input_mode == 'all_electrons'
+    orbital_head_uses_flattened_electrons = orbital_head_input_mode in (
+        'global',
+        'flatten',
+    )
+    orbital_head_input_dim = mkan_output_dim
+    orbital_head_output_dim = orbital_output_dim
+    if orbital_head_enabled and orbital_head_uses_all_electrons:
+        orbital_head_input_dim = 4 * mkan_output_dim
+    elif orbital_head_enabled and orbital_head_uses_flattened_electrons:
+        orbital_head_input_dim = nelectrons * mkan_output_dim
+        orbital_head_output_dim = nelectrons * orbital_output_dim
 
     if mkan_cfg.get('width', None) is None:
         hidden_dims = [int(v) for v in np.asarray(cfg.layer_dims).reshape(-1)[1:-1]]
@@ -170,6 +281,64 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         static_state,
         checkpoint.get('mkan_static_state') if checkpoint is not None else None,
     )
+    head_graphdef = None
+    initial_head_params = None
+    head_static_state = None
+    if orbital_head_enabled:
+        if orbital_head_type in ('dense', 'mlp'):
+            head_template = networks.DenseOrbitalHead(
+                input_dim=orbital_head_input_dim,
+                output_dim=orbital_head_output_dim,
+                hidden_dims=orbital_head_hidden_dims,
+                activation=orbital_head_activation,
+                add_bias=orbital_head_bias,
+                rwf=orbital_head_rwf,
+                seed=int(cfg.seed) + 7919,
+            )
+        elif orbital_head_type == 'kan':
+            head_template = networks.KANOrbitalHead(
+                input_dim=orbital_head_input_dim,
+                output_dim=orbital_head_output_dim,
+                hidden_dims=orbital_head_hidden_dims,
+                layer_type=orbital_head_layer_type,
+                required_parameters=_kan_required_parameters_for_layer(
+                    cfg,
+                    orbital_head_layer_type,
+                    orbital_head_required_parameters,
+                    add_bias=orbital_head_bias,
+                ),
+                seed=int(cfg.seed) + 7919,
+            )
+        elif orbital_head_type in ('mkan', 'multkan'):
+            head_template = networks.MKANOrbitalHead(
+                input_dim=orbital_head_input_dim,
+                output_dim=orbital_head_output_dim,
+                hidden_dims=orbital_head_hidden_dims,
+                width=orbital_head_width,
+                layer_type=orbital_head_layer_type,
+                required_parameters=_kan_required_parameters_for_layer(
+                    cfg,
+                    orbital_head_layer_type,
+                    orbital_head_required_parameters,
+                    add_bias=orbital_head_bias,
+                ),
+                mult_arity=orbital_head_mult_arity,
+                seed=int(cfg.seed) + 7919,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported orbital_head.type={orbital_head_type!r}. "
+                "Expected 'mlp', 'dense', 'kan', or 'mkan'."
+            )
+        head_graphdef, initial_head_params, head_static_state = nnx.split(
+            head_template,
+            nnx.Param,
+            ...,
+        )
+        head_static_state = _merge_static_state_with_template(
+            head_static_state,
+            checkpoint.get('orbital_head_static_state') if checkpoint is not None else None,
+        )
     jastrow_type = str(cfg.get('jastrow', {}).get('type', 'pade')).lower()
     if jastrow_type == 'pade':
         same_spin_pairs, opposite_spin_pairs = jastrow.spin_pair_indices(electrons)
@@ -195,6 +364,65 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         model = nnx.merge(graphdef, model_params, static_state)
         return model(features)
 
+    def all_electron_head_inputs(node_values):
+        global_mean = jnp.mean(node_values, axis=0, keepdims=True)
+        contexts = []
+        spin_slices = []
+        start = 0
+        for spin in electrons:
+            stop = start + int(spin)
+            if stop > start:
+                spin_slices.append((start, stop))
+            start = stop
+
+        for index, (start, stop) in enumerate(spin_slices):
+            local_nodes = node_values[start:stop]
+            same_mean = jnp.mean(local_nodes, axis=0, keepdims=True)
+            opposite_parts = [
+                node_values[other_start:other_stop]
+                for other_index, (other_start, other_stop) in enumerate(spin_slices)
+                if other_index != index
+            ]
+            if opposite_parts:
+                opposite_nodes = jnp.concatenate(opposite_parts, axis=0)
+                opposite_mean = jnp.mean(opposite_nodes, axis=0, keepdims=True)
+            else:
+                opposite_mean = jnp.zeros_like(same_mean)
+            row_count = stop - start
+            contexts.append(
+                jnp.concatenate(
+                    [
+                        local_nodes,
+                        jnp.broadcast_to(global_mean, (row_count, mkan_output_dim)),
+                        jnp.broadcast_to(same_mean, (row_count, mkan_output_dim)),
+                        jnp.broadcast_to(opposite_mean, (row_count, mkan_output_dim)),
+                    ],
+                    axis=-1,
+                )
+            )
+        return jnp.concatenate(contexts, axis=0)
+
+    def apply_orbital_head(params, node_values):
+        if not orbital_head_enabled:
+            return node_values
+        head_params = (
+            params.get('orbital_head', initial_head_params)
+            if isinstance(params, dict)
+            else initial_head_params
+        )
+        head = nnx.merge(
+            head_graphdef,
+            head_params,
+            head_static_state,
+        )
+        if orbital_head_uses_all_electrons:
+            return head(all_electron_head_inputs(node_values))
+        if orbital_head_uses_flattened_electrons:
+            flat_nodes = jnp.reshape(node_values, (1, orbital_head_input_dim))
+            flat_values = head(flat_nodes)
+            return jnp.reshape(flat_values, (nelectrons, orbital_output_dim))
+        return head(node_values)
+
     def orbitals_apply(params, pos, spins_, atoms_, charges_):
         del spins_, charges_
         ae, ee, r_ae, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
@@ -205,7 +433,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             r_ee,
             feature_mode=orbital_feature_mode,
         )
-        orbital_values = apply_mkan(params, h_one)
+        mkan_nodes = apply_mkan(params, h_one)
+        orbital_values = apply_orbital_head(params, mkan_nodes)
         if bool(cfg.complex_output):
             real_channel_count = 2 * ndeterminants * nelectrons
             orbital_values = (
@@ -265,6 +494,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 apply_envelope = envelope.apply_legendre_angular_envelope
             elif envelope.is_complex_angular_momentum(envelope_type):
                 apply_envelope = envelope.apply_complex_angular_momentum_envelope
+            elif envelope.is_ferminet_angular(envelope_type):
+                apply_envelope = envelope.apply_ferminet_angular_envelope
             else:
                 raise ValueError(f'Unsupported envelope_type={envelope_type!r}.')
             if envelope.is_legendre_anisotropic(envelope_type):
@@ -320,6 +551,23 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
                         orbital_channels,
                         r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
+                    )
+                ]
+            elif envelope.is_ferminet_angular(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        ae=ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        ae_channels,
                         theta_channels,
                         phi_channels,
                         params['envelope'],
