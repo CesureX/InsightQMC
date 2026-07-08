@@ -222,6 +222,8 @@ class VMCTrainer:
         self.envelope_on = bool(cfg.envelope_on)
         self.envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
         self.envelope_degree = int(cfg.get('envelope_degree', 5))
+        if envelope.is_complex_angular_momentum(self.envelope_type) and not self.complex_output:
+            raise ValueError('complex_angular_momentum envelope requires complex_output=True.')
         jastrow_cfg = cfg.get('jastrow', {})
         self.jastrow_ee = bool(jastrow_cfg.get('ee', True))
         self.jastrow_en = bool(jastrow_cfg.get('en', False))
@@ -243,11 +245,18 @@ class VMCTrainer:
         self.orbital_head_type = str(orbital_head_cfg.get('type', 'dense')).lower()
         self.orbital_head_bias = bool(orbital_head_cfg.get('bias', True))
         self.orbital_head_input_mode = str(
-            orbital_head_cfg.get('input_mode', 'per_electron')
+            orbital_head_cfg.get('input_mode', 'shared_rows')
         ).lower()
-        if self.orbital_head_input_mode not in ('per_electron', 'all_electrons', 'global', 'flatten'):
+        if self.orbital_head_input_mode not in (
+            'shared_rows',
+            'per_electron',
+            'all_electrons',
+            'global',
+            'flatten',
+        ):
             raise ValueError(
-                "orbital_head.input_mode must be 'per_electron' or 'all_electrons'."
+                "orbital_head.input_mode must be 'shared_rows', 'per_electron', "
+                "'all_electrons', 'global', or 'flatten'."
             )
         self.orbital_head_hidden_dims = tuple(
             int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
@@ -288,14 +297,16 @@ class VMCTrainer:
                 f'mkan.output_dim must be at least {self.orbital_output_dim} for '
                 'orbital MKAN wavefunctions.'
             )
-        self.orbital_head_uses_all_electrons = self.orbital_head_input_mode in (
-            'all_electrons',
+        self.orbital_head_uses_all_electrons = self.orbital_head_input_mode == 'all_electrons'
+        self.orbital_head_uses_flattened_electrons = self.orbital_head_input_mode in (
             'global',
             'flatten',
         )
         self.orbital_head_input_dim = self.mkan_output_dim
         self.orbital_head_output_dim = self.orbital_output_dim
         if self.orbital_head_enabled and self.orbital_head_uses_all_electrons:
+            self.orbital_head_input_dim = 4 * self.mkan_output_dim
+        elif self.orbital_head_enabled and self.orbital_head_uses_flattened_electrons:
             self.orbital_head_input_dim = self.nelectrons * self.mkan_output_dim
             self.orbital_head_output_dim = self.nelectrons * self.orbital_output_dim
         self.adapt_frequency = int(cfg.get('mcmc_adapt_frequency', 20))
@@ -401,6 +412,31 @@ class VMCTrainer:
                     degree=self.envelope_degree,
                     ndim=3,
                 )
+            elif envelope.is_angular_momentum(self.envelope_type):
+                envelope_params = envelope.init_angular_momentum_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                )
+            elif envelope.is_legendre_angular(self.envelope_type):
+                envelope_params = envelope.init_legendre_angular_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                )
+            elif envelope.is_complex_angular_momentum(self.envelope_type):
+                envelope_params = envelope.init_complex_angular_momentum_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                )
+            elif envelope.is_ferminet_angular(self.envelope_type):
+                envelope_params = envelope.init_ferminet_angular_envelope(
+                    self.natoms,
+                    envelope_output_dims,
+                    degree=self.envelope_degree,
+                    ndim=3,
+                )
             else:
                 raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
         if self.jastrow_type == 'pade':
@@ -434,9 +470,9 @@ class VMCTrainer:
         )
 
         def kan_init(key):
+            del key
             params = {'mkan': initial_params}
             if self.orbital_head_enabled:
-                del key
                 params['orbital_head'] = initial_head_params
             if self.use_determinant_weights and self.ndeterminants > 1:
                 params['det_weights'] = jnp.ones((self.ndeterminants, 1)) / self.ndeterminants
@@ -456,8 +492,46 @@ class VMCTrainer:
                     f'MKAN input dimension mismatch: got {features.shape[-1]}, '
                     f'expected {self.mkan_input_dim}. Set cfg.mkan.input_dim '
                     'or cfg.mkan.width if you want a different feature size.'
-                )
+            )
             return model(features)
+
+        def all_electron_head_inputs(node_values):
+            global_mean = jnp.mean(node_values, axis=0, keepdims=True)
+            contexts = []
+            spin_slices = []
+            start = 0
+            for spin in self.electrons:
+                stop = start + int(spin)
+                if stop > start:
+                    spin_slices.append((start, stop))
+                start = stop
+
+            for index, (start, stop) in enumerate(spin_slices):
+                local_nodes = node_values[start:stop]
+                same_mean = jnp.mean(local_nodes, axis=0, keepdims=True)
+                opposite_parts = [
+                    node_values[other_start:other_stop]
+                    for other_index, (other_start, other_stop) in enumerate(spin_slices)
+                    if other_index != index
+                ]
+                if opposite_parts:
+                    opposite_nodes = jnp.concatenate(opposite_parts, axis=0)
+                    opposite_mean = jnp.mean(opposite_nodes, axis=0, keepdims=True)
+                else:
+                    opposite_mean = jnp.zeros_like(same_mean)
+                row_count = stop - start
+                contexts.append(
+                    jnp.concatenate(
+                        [
+                            local_nodes,
+                            jnp.broadcast_to(global_mean, (row_count, self.mkan_output_dim)),
+                            jnp.broadcast_to(same_mean, (row_count, self.mkan_output_dim)),
+                            jnp.broadcast_to(opposite_mean, (row_count, self.mkan_output_dim)),
+                        ],
+                        axis=-1,
+                    )
+                )
+            return jnp.concatenate(contexts, axis=0)
 
         def apply_orbital_head(params, node_values):
             if not self.orbital_head_enabled:
@@ -470,6 +544,8 @@ class VMCTrainer:
                 self._orbital_head_static_state,
             )
             if self.orbital_head_uses_all_electrons:
+                return head(all_electron_head_inputs(node_values))
+            if self.orbital_head_uses_flattened_electrons:
                 flat_nodes = jnp.reshape(node_values, (1, self.orbital_head_input_dim))
                 flat_values = head(flat_nodes)
                 return jnp.reshape(flat_values, (self.nelectrons, self.orbital_output_dim))
@@ -527,6 +603,15 @@ class VMCTrainer:
                 ae_channels = [
                     channel for channel, spin in zip(ae_channels, self.electrons) if spin > 0
                 ]
+                theta, phi = envelope.angular_coordinates(ae)
+                theta_channels = jnp.split(theta, spin_partitions, axis=0)
+                theta_channels = [
+                    channel for channel, spin in zip(theta_channels, self.electrons) if spin > 0
+                ]
+                phi_channels = jnp.split(phi, spin_partitions, axis=0)
+                phi_channels = [
+                    channel for channel, spin in zip(phi_channels, self.electrons) if spin > 0
+                ]
                 if self.envelope_type == 'isotropic':
                     apply_envelope = envelope.apply_isotropic_envelope
                 elif self.envelope_type == 'chebyshev':
@@ -535,6 +620,14 @@ class VMCTrainer:
                     apply_envelope = envelope.apply_legendre_envelope
                 elif envelope.is_legendre_anisotropic(self.envelope_type):
                     apply_envelope = envelope.apply_legendre_anisotropic_envelope
+                elif envelope.is_angular_momentum(self.envelope_type):
+                    apply_envelope = envelope.apply_angular_momentum_envelope
+                elif envelope.is_legendre_angular(self.envelope_type):
+                    apply_envelope = envelope.apply_legendre_angular_envelope
+                elif envelope.is_complex_angular_momentum(self.envelope_type):
+                    apply_envelope = envelope.apply_complex_angular_momentum_envelope
+                elif envelope.is_ferminet_angular(self.envelope_type):
+                    apply_envelope = envelope.apply_ferminet_angular_envelope
                 else:
                     raise ValueError(f'Unsupported envelope_type={self.envelope_type!r}.')
                 if envelope.is_legendre_anisotropic(self.envelope_type):
@@ -542,6 +635,74 @@ class VMCTrainer:
                         channel * apply_envelope(ae=ae_channel, **envelope_param)
                         for channel, ae_channel, envelope_param in zip(
                             orbital_channels, ae_channels, params['envelope']
+                        )
+                    ]
+                elif envelope.is_angular_momentum(self.envelope_type):
+                    orbital_channels = [
+                        channel
+                        * apply_envelope(
+                            r_ae=r_ae_channel,
+                            theta=theta_channel,
+                            phi=phi_channel,
+                            **envelope_param,
+                        )
+                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                            orbital_channels,
+                            r_ae_channels,
+                            theta_channels,
+                            phi_channels,
+                            params['envelope'],
+                        )
+                    ]
+                elif envelope.is_legendre_angular(self.envelope_type):
+                    orbital_channels = [
+                        channel
+                        * apply_envelope(
+                            r_ae=r_ae_channel,
+                            theta=theta_channel,
+                            phi=phi_channel,
+                            **envelope_param,
+                        )
+                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                            orbital_channels,
+                            r_ae_channels,
+                            theta_channels,
+                            phi_channels,
+                            params['envelope'],
+                        )
+                    ]
+                elif envelope.is_complex_angular_momentum(self.envelope_type):
+                    orbital_channels = [
+                        channel
+                        * apply_envelope(
+                            r_ae=r_ae_channel,
+                            theta=theta_channel,
+                            phi=phi_channel,
+                            **envelope_param,
+                        )
+                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                            orbital_channels,
+                            r_ae_channels,
+                            theta_channels,
+                            phi_channels,
+                            params['envelope'],
+                        )
+                    ]
+                elif envelope.is_ferminet_angular(self.envelope_type):
+                    orbital_channels = [
+                        channel
+                        * apply_envelope(
+                            ae=ae_channel,
+                            theta=theta_channel,
+                            phi=phi_channel,
+                            **envelope_param,
+                        )
+                        for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                            orbital_channels,
+                            ae_channels,
+                            theta_channels,
+                            phi_channels,
+                            params['envelope'],
                         )
                     ]
                 else:
@@ -804,10 +965,7 @@ class VMCTrainer:
                     self._mkan_static_state,
                     resume_state['mkan_static_state'],
                 )
-            if (
-                self.orbital_head_enabled
-                and resume_state.get('orbital_head_static_state') is not None
-            ):
+            if resume_state.get('orbital_head_static_state') is not None:
                 self._orbital_head_static_state = _merge_static_state_with_template(
                     self._orbital_head_static_state,
                     resume_state['orbital_head_static_state'],
@@ -1111,6 +1269,31 @@ class VMCTrainer:
             )
         if envelope.is_legendre_anisotropic(self.envelope_type):
             return envelope.init_legendre_anisotropic_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+                ndim=3,
+            )
+        if envelope.is_angular_momentum(self.envelope_type):
+            return envelope.init_angular_momentum_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+            )
+        if envelope.is_legendre_angular(self.envelope_type):
+            return envelope.init_legendre_angular_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+            )
+        if envelope.is_complex_angular_momentum(self.envelope_type):
+            return envelope.init_complex_angular_momentum_envelope(
+                self.natoms,
+                output_dims,
+                degree=self.envelope_degree,
+            )
+        if envelope.is_ferminet_angular(self.envelope_type):
+            return envelope.init_ferminet_angular_envelope(
                 self.natoms,
                 output_dims,
                 degree=self.envelope_degree,

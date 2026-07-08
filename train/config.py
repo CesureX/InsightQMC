@@ -1,21 +1,18 @@
-from datetime import datetime
-
 import ml_collections
 from tools.utils import system
 
 
 def default() -> ml_collections.ConfigDict:
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 8192,
-        'layer_dims': [8, 16, 6],
+        'layer_dims': [8, 8, 8, 6],
         'g': [10],
         'k': [3], #7
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 200,
-        'preiterations': 100,
+        'iterations': 30000,
+        'preiterations': 5000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -51,18 +48,18 @@ def default() -> ml_collections.ConfigDict:
         # 0 means use all local JAX devices. batch_size is the global batch and
         # must be divisible by the number of devices used.
         'num_devices': 0,
-        'reset_optimizer_on_resume': True,
+        'reset_optimizer_on_resume': False,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
-        'envelope_type': 'legendre_anisotropic', # isotropic, chebyshev, legendre,legendre_anisotropic
+        'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
         'envelope_degree': 7,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
             # [r_ae, ae, ee_density, ee_vec] for Li when orbital_features='ee_aggregate'.
-            # With orbital_head.enabled=True, MKAN returns node features first; the
-            # selected orbital head maps those nodes to orbital channels.
+            # The final output is 2 * ndeterminants * nelectrons real channels when
+            # complex_output=True.
             'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
             #'layer_type': 'chebyshev',
@@ -72,19 +69,19 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'fourier'
             'input_dim': None,
             'output_dim': None,
-            # [n_sum, n_mult] opens MKAN multiplication nodes in that hidden layer.
-            'width': [8, 8, 6],
+            # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
+            'width': None,
             'mult_arity': 2,
             'required_parameters': None,
             'orbital_head': {
+                # When enabled, MKAN first returns node features and this head maps
+                # those nodes to final orbital channels.
                 'enabled': True,
-                # type='mkan' uses MultKAN; type='mlp' uses DenseLayer.
+                # type='mlp' with hidden_dims=[] is the shared linear map H M0 + b.
                 'type': 'mlp',
-                # all_electrons flattens all electron MKAN nodes before the head.
-                # per_electron applies the head independently to each electron row.
-                'input_mode': 'all_electrons',
-                # 'input_mode': 'per_electron',
-                # Used when width=None. [] is a single output layer.
+                # shared_rows applies one shared head to every electron row of H.
+                'input_mode': 'shared_rows',
+                # [] makes the MLP head a single linear layer.
                 'hidden_dims': [],
                 # MKAN-only width. Use e.g. [None, [8, 4], None] for 4 multiplication nodes.
                 'width': None,
@@ -116,7 +113,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': f'outputs/Li/{timestamp}',
+            'root_dir': 'outputs/Li07081229_with_M',
             'checkpoint_every': 50,
             'metrics_every': 5,
             'resume': False,

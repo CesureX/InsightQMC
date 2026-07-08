@@ -249,7 +249,6 @@ def make_pretrain_step(
   def pretrain_step(data, params, state, key, scf_approx):
     """One iteration of pretraining to match HF."""
     target = scf_approx.eval_orbitals(data.positions, electrons)
-    breakpoint()
     val_and_grad = jax.value_and_grad(loss_fn, argnums=0)
     loss_val, search_direction = val_and_grad(params, data, target)
     loss_val = constants.pmean(loss_val)

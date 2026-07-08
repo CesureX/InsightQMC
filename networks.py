@@ -9,9 +9,9 @@ import chex
 import jax.numpy as jnp
 from flax import nnx
 
+from jkan.layers.Dense import DenseLayer
 from jkan.models.KAN import KAN
 from jkan.models.MKAN import MultKAN
-from jkan.layers.Dense import DenseLayer
 from jkan.models.utils import get_activation
 
 
@@ -46,9 +46,7 @@ class DenseOrbitalHead(nnx.Module):
             raise ValueError("Orbital head dimensions must be positive.")
 
         activation_fn = get_activation(activation)
-        dense_kwargs = {
-            "add_bias": bool(add_bias),
-        }
+        dense_kwargs = {"add_bias": bool(add_bias)}
         if rwf is not None:
             dense_kwargs["RWF"] = dict(rwf)
 

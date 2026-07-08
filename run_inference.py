@@ -83,7 +83,6 @@ def _kan_required_parameters_for_layer(
         bool(cfg.external_weights) if external_weights is None else bool(external_weights)
     )
     layer_type = str(layer_type).lower()
-
     if layer_type in ('chebyshev', 'legendre'):
         return {
             'D': _first_int(cfg.k, 3),
@@ -172,11 +171,18 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     orbital_head_enabled = bool(orbital_head_cfg.get('enabled', False))
     orbital_head_type = str(orbital_head_cfg.get('type', 'dense')).lower()
     orbital_head_input_mode = str(
-        orbital_head_cfg.get('input_mode', 'per_electron')
+        orbital_head_cfg.get('input_mode', 'shared_rows')
     ).lower()
-    if orbital_head_input_mode not in ('per_electron', 'all_electrons', 'global', 'flatten'):
+    if orbital_head_input_mode not in (
+        'shared_rows',
+        'per_electron',
+        'all_electrons',
+        'global',
+        'flatten',
+    ):
         raise ValueError(
-            "orbital_head.input_mode must be 'per_electron' or 'all_electrons'."
+            "orbital_head.input_mode must be 'shared_rows', 'per_electron', "
+            "'all_electrons', 'global', or 'flatten'."
         )
     orbital_head_hidden_dims = tuple(
         int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
@@ -203,14 +209,16 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         mkan_output_dim = int(
             orbital_output_dim if mkan_cfg.get('output_dim', None) is None else mkan_cfg.output_dim
         )
-    orbital_head_uses_all_electrons = orbital_head_input_mode in (
-        'all_electrons',
+    orbital_head_uses_all_electrons = orbital_head_input_mode == 'all_electrons'
+    orbital_head_uses_flattened_electrons = orbital_head_input_mode in (
         'global',
         'flatten',
     )
     orbital_head_input_dim = mkan_output_dim
     orbital_head_output_dim = orbital_output_dim
     if orbital_head_enabled and orbital_head_uses_all_electrons:
+        orbital_head_input_dim = 4 * mkan_output_dim
+    elif orbital_head_enabled and orbital_head_uses_flattened_electrons:
         orbital_head_input_dim = nelectrons * mkan_output_dim
         orbital_head_output_dim = nelectrons * orbital_output_dim
 
@@ -357,6 +365,44 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         model = nnx.merge(graphdef, model_params, static_state)
         return model(features)
 
+    def all_electron_head_inputs(node_values):
+        global_mean = jnp.mean(node_values, axis=0, keepdims=True)
+        contexts = []
+        spin_slices = []
+        start = 0
+        for spin in electrons:
+            stop = start + int(spin)
+            if stop > start:
+                spin_slices.append((start, stop))
+            start = stop
+
+        for index, (start, stop) in enumerate(spin_slices):
+            local_nodes = node_values[start:stop]
+            same_mean = jnp.mean(local_nodes, axis=0, keepdims=True)
+            opposite_parts = [
+                node_values[other_start:other_stop]
+                for other_index, (other_start, other_stop) in enumerate(spin_slices)
+                if other_index != index
+            ]
+            if opposite_parts:
+                opposite_nodes = jnp.concatenate(opposite_parts, axis=0)
+                opposite_mean = jnp.mean(opposite_nodes, axis=0, keepdims=True)
+            else:
+                opposite_mean = jnp.zeros_like(same_mean)
+            row_count = stop - start
+            contexts.append(
+                jnp.concatenate(
+                    [
+                        local_nodes,
+                        jnp.broadcast_to(global_mean, (row_count, mkan_output_dim)),
+                        jnp.broadcast_to(same_mean, (row_count, mkan_output_dim)),
+                        jnp.broadcast_to(opposite_mean, (row_count, mkan_output_dim)),
+                    ],
+                    axis=-1,
+                )
+            )
+        return jnp.concatenate(contexts, axis=0)
+
     def apply_orbital_head(params, node_values):
         if not orbital_head_enabled:
             return node_values
@@ -371,6 +417,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             head_static_state,
         )
         if orbital_head_uses_all_electrons:
+            return head(all_electron_head_inputs(node_values))
+        if orbital_head_uses_flattened_electrons:
             flat_nodes = jnp.reshape(node_values, (1, orbital_head_input_dim))
             flat_values = head(flat_nodes)
             return jnp.reshape(flat_values, (nelectrons, orbital_output_dim))
@@ -423,6 +471,15 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             ae_channels = [
                 channel for channel, spin in zip(ae_channels, electrons) if spin > 0
             ]
+            theta, phi = envelope.angular_coordinates(ae)
+            theta_channels = jnp.split(theta, spin_partitions, axis=0)
+            theta_channels = [
+                channel for channel, spin in zip(theta_channels, electrons) if spin > 0
+            ]
+            phi_channels = jnp.split(phi, spin_partitions, axis=0)
+            phi_channels = [
+                channel for channel, spin in zip(phi_channels, electrons) if spin > 0
+            ]
             envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
             if envelope_type == 'isotropic':
                 apply_envelope = envelope.apply_isotropic_envelope
@@ -432,6 +489,14 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 apply_envelope = envelope.apply_legendre_envelope
             elif envelope.is_legendre_anisotropic(envelope_type):
                 apply_envelope = envelope.apply_legendre_anisotropic_envelope
+            elif envelope.is_angular_momentum(envelope_type):
+                apply_envelope = envelope.apply_angular_momentum_envelope
+            elif envelope.is_legendre_angular(envelope_type):
+                apply_envelope = envelope.apply_legendre_angular_envelope
+            elif envelope.is_complex_angular_momentum(envelope_type):
+                apply_envelope = envelope.apply_complex_angular_momentum_envelope
+            elif envelope.is_ferminet_angular(envelope_type):
+                apply_envelope = envelope.apply_ferminet_angular_envelope
             else:
                 raise ValueError(f'Unsupported envelope_type={envelope_type!r}.')
             if envelope.is_legendre_anisotropic(envelope_type):
@@ -439,6 +504,74 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     channel * apply_envelope(ae=ae_channel, **envelope_param)
                     for channel, ae_channel, envelope_param in zip(
                         orbital_channels, ae_channels, params['envelope']
+                    )
+                ]
+            elif envelope.is_angular_momentum(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        r_ae=r_ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
+                    )
+                ]
+            elif envelope.is_legendre_angular(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        r_ae=r_ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
+                    )
+                ]
+            elif envelope.is_complex_angular_momentum(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        r_ae=r_ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        r_ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
+                    )
+                ]
+            elif envelope.is_ferminet_angular(envelope_type):
+                orbital_channels = [
+                    channel
+                    * apply_envelope(
+                        ae=ae_channel,
+                        theta=theta_channel,
+                        phi=phi_channel,
+                        **envelope_param,
+                    )
+                    for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        orbital_channels,
+                        ae_channels,
+                        theta_channels,
+                        phi_channels,
+                        params['envelope'],
                     )
                 ]
             else:
