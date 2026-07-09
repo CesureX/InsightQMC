@@ -8,7 +8,7 @@ def default() -> ml_collections.ConfigDict:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 49152,
+        'batch_size': 32768,
         'layer_dims': [8, 8, 8, 6],
         'g': [10],
         'k': [3], #7
