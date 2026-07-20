@@ -6,11 +6,11 @@ def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 8192,
-        'layer_dims': [8, 16, 16, 16, 24],
+        'layer_dims': [12, 16, 16, 16, 24],
         'g': [10],
         'k': [3], 
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'grid_range': [-3, 3],
+        'grid_range': [-4, 4],
         'iterations': 100000,
         'preiterations': 10000,
         'run_pretrain': True,
@@ -26,7 +26,7 @@ def default() -> ml_collections.ConfigDict:
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 8,
+        'nfeatures': 12,
         'orbital_features': 'ee_aggregate',
         'mcmc_steps': 10,
         'mcmc_width': 0.02, #0.02 for C
@@ -57,7 +57,7 @@ def default() -> ml_collections.ConfigDict:
         'external_weights': True,
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
-            # [r_ae, ae, ee_density, ee_vec] for Li when orbital_features='ee_aggregate'.
+            # [r_ae, ae, ee_density, ee_vec] for LiH when orbital_features='ee_aggregate'.
             # The final output is 2 * ndeterminants * nelectrons real channels when
             'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
@@ -101,8 +101,11 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': 4096,
         },
         'system': {
-            'molecule': [system.Atom('Li', (0, 0, 0))],
-            'electrons': (2,1), 
+            'molecule': [
+                system.Atom('Li', (0, 0, 0)),
+                system.Atom('H', (0, 0, 3.015)),
+            ],
+            'electrons': (2,2), 
         },
         'jastrow': {
             'ee': True, 
@@ -112,7 +115,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/Li07201340_with_M_largeparameters1',
+            'root_dir': 'outputs/LiH07202150_with_M_largeparameters1',
             'checkpoint_every': 1000,
             'metrics_every': 5,
             'resume': True,
