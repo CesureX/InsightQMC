@@ -6,13 +6,13 @@ def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 8192,
-        'layer_dims': [8, 8, 8, 6],
+        'layer_dims': [8, 16, 16, 16, 24],
         'g': [10],
-        'k': [3], #7
+        'k': [3], 
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'grid_range': [-2, 2],
-        'iterations': 30000,
-        'preiterations': 5000,
+        'grid_range': [-3, 3],
+        'iterations': 100000,
+        'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -28,20 +28,20 @@ def default() -> ml_collections.ConfigDict:
         'scf_fraction': 0.0,
         'nfeatures': 8,
         'orbital_features': 'ee_aggregate',
-        'mcmc_steps': 50,
-        'mcmc_width': 0.05,
+        'mcmc_steps': 10,
+        'mcmc_width': 0.02, #0.02 for C
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
         'clip_local_energy': 5.0,
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
-        'ndeterminants': 1,
+        'ndeterminants': 16,
         'determinant_weights': True,
         'laplacian_method': 'default',
         't_init': 0,
         'debug': False,
-        'learning_rate': 0.00002,
+        'learning_rate': 0.00004,
         'learning_rate_decay': 50000.0,
         'gradient_clip_norm': 1.0,
         'multi_device': True,
@@ -52,7 +52,7 @@ def default() -> ml_collections.ConfigDict:
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
         'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
-        'envelope_degree': 7,
+        'envelope_degree': 0,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
@@ -67,7 +67,7 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'sine'
             # 'layer_type': 'fourier'
             'input_dim': None,
-            'output_dim': None,
+            'output_dim': 24,
             # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
             'width': None,
             'mult_arity': 2,
@@ -96,8 +96,8 @@ def default() -> ml_collections.ConfigDict:
         },
         'grid_extension': {
             'enabled': False,
-            'steps': [],
-            'g_values': [],
+            'steps': [10000],
+            'g_values': [10],
             'sample_size': 4096,
         },
         'system': {
@@ -105,17 +105,17 @@ def default() -> ml_collections.ConfigDict:
             'electrons': (2,1), 
         },
         'jastrow': {
-            'ee': True,
-            'en': False,
+            'ee': True, 
+            'en': True,
             'en_radial_order': 4,
             'radial_order': 4,
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/Li07081229_with_M',
-            'checkpoint_every': 50,
+            'root_dir': 'outputs/Li07201340_with_M_largeparameters1',
+            'checkpoint_every': 1000,
             'metrics_every': 5,
-            'resume': False,
+            'resume': True,
             'enable_tensorboard': True,
         },
     })

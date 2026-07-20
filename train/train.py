@@ -352,8 +352,63 @@ class VMCTrainer:
             'pretrain_opt_state': pretrain_opt_state,
             'train_opt_state': train_opt_state,
             'mkan_static_state': self._mkan_static_state,
+            'mkan_grid_state': self._extract_mkan_grid_state(params),
             'orbital_head_static_state': self._orbital_head_static_state,
         }
+
+    def _extract_mkan_grid_state(self, params):
+        if self.mkan_layer_type not in ('base', 'spline'):
+            return None
+        if not (isinstance(params, dict) and 'mkan' in params):
+            return None
+        if self._mkan_graphdef is None or self._mkan_static_state is None:
+            return None
+
+        model = nnx.merge(self._mkan_graphdef, params['mkan'], self._mkan_static_state)
+        layer_states = []
+        for layer in model.layers:
+            grid = getattr(layer, 'grid', None)
+            if grid is None:
+                layer_states.append(None)
+                continue
+            layer_states.append(
+                {
+                    'G': int(grid.G),
+                    'grid_range': tuple(float(v) for v in grid.grid_range),
+                    'grid_e': float(grid.grid_e),
+                    'item': jnp.asarray(grid.item),
+                }
+            )
+        return {'layers': layer_states}
+
+    def _restore_mkan_grid_state(self, params, grid_state) -> None:
+        if not grid_state or self.mkan_layer_type not in ('base', 'spline'):
+            return
+        if not (isinstance(params, dict) and 'mkan' in params):
+            return
+
+        model = nnx.merge(self._mkan_graphdef, params['mkan'], self._mkan_static_state)
+        for layer, layer_state in zip(model.layers, grid_state.get('layers', ())):
+            if layer_state is None:
+                continue
+            grid = getattr(layer, 'grid', None)
+            if grid is None:
+                continue
+            grid.G = int(layer_state['G'])
+            grid.grid_range = tuple(float(v) for v in layer_state['grid_range'])
+            grid.grid_e = float(layer_state['grid_e'])
+            grid.item = jnp.asarray(layer_state['item'])
+        self._mkan_graphdef, _, self._mkan_static_state = nnx.split(
+            model, nnx.Param, ...
+        )
+
+    def _resume_requires_mkan_grid_state(self, resume_state) -> bool:
+        if not self.grid_extension_enabled or self.mkan_layer_type not in ('base', 'spline'):
+            return False
+        if resume_state.get('stage') != 'train':
+            return False
+        step = int(resume_state.get('step', 0))
+        return any(step >= extension_step for extension_step in self.grid_extension_steps)
 
     def _build_networks(self):
         model_template = self._make_mkan_template()
@@ -978,6 +1033,16 @@ class VMCTrainer:
                 self._mkan_static_state = _merge_static_state_with_template(
                     self._mkan_static_state,
                     resume_state['mkan_static_state'],
+                )
+            if resume_state.get('mkan_grid_state') is not None:
+                self._restore_mkan_grid_state(params, resume_state['mkan_grid_state'])
+            elif self._resume_requires_mkan_grid_state(resume_state):
+                raise ValueError(
+                    'Cannot safely resume this checkpoint: it was saved after '
+                    'grid_extension changed the MKAN spline grid, but the checkpoint '
+                    'does not contain mkan_grid_state. Resume from a checkpoint before '
+                    'the first grid_extension step, or use a newer checkpoint created '
+                    'after this fix.'
                 )
             if resume_state.get('orbital_head_static_state') is not None:
                 self._orbital_head_static_state = _merge_static_state_with_template(
@@ -1621,15 +1686,15 @@ class VMCTrainer:
                 iterator.write(f'Extended MKAN grid to G={g_new} at train step {step_id}.')
                 self.run_manager.log_scalars('train', step_id, {'grid_G': float(g_new)})
 
-            checkpoint_state = self._build_checkpoint_state(
-                stage='train',
-                step=step_id,
-                params=self._host_params(state.params),
-                data=self._host_data(data),
-                key=key,
-                train_opt_state=self._host_opt_state(state.opt_state),
-            )
             if self.run_manager.should_checkpoint(step_id, self.iterations):
+                checkpoint_state = self._build_checkpoint_state(
+                    stage='train',
+                    step=step_id,
+                    params=self._host_params(state.params),
+                    data=self._host_data(data),
+                    key=key,
+                    train_opt_state=self._host_opt_state(state.opt_state),
+                )
                 self.run_manager.checkpoints.save_step('train', step_id, checkpoint_state)
 
             runtime = runtime.replace(data=data, key=key)
