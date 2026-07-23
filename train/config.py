@@ -6,12 +6,12 @@ def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 32768,
-        'layer_dims': [8, 48, 48, 48, 64],
+        'layer_dims': [12, 48, 48, 48, 64],
         'g': [10],
         'k': [10],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-3, 3],
-        'iterations': 150000,
+        'iterations': 200000,
         'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
@@ -26,7 +26,7 @@ def default() -> ml_collections.ConfigDict:
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 8,
+        'nfeatures': 12,
         'orbital_features': 'ee_aggregate',
         'mcmc_method': 'random_walk', # mala: guided/Langevin; random_walk: FermiNet-style Gaussian proposal
         'pretrain_mcmc_method': 'random_walk',
@@ -104,9 +104,10 @@ def default() -> ml_collections.ConfigDict:
         },
         'system': {
             'molecule': [
-                system.Atom('C', (0.0, 0.0, 0.0)),
+                system.Atom('N', (0.0, 0.0, 0.0)),
+                system.Atom('N', (0.0, 0.0, 2.068)),
             ],
-            'electrons': (4, 2),
+            'electrons': (7, 7),
         },
         'jastrow': {
             'ee': True, 
@@ -117,11 +118,12 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/C07230057_with_M_70k_superparameters_chebyshev',
+            'root_dir': 'outputs/N2_0723_bond2068_with_M_70k_superparameters_chebyshev',
             'checkpoint_every': 10000,
             'metrics_every': 5,
             'resume': False,
             'enable_tensorboard': True,
+            'auto_analyze': True,
         },
     })
     return cfg

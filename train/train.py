@@ -1,4 +1,6 @@
 import pickle
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -1717,7 +1719,29 @@ class VMCTrainer:
 
             runtime = runtime.replace(data=data, key=key)
 
+    def _run_output_analysis(self) -> None:
+        if not bool(self.cfg.output.get('auto_analyze', True)):
+            return
+
+        repo_root = Path(__file__).resolve().parents[1]
+        analyzer = repo_root / 'output_analysis' / 'analyze_run.py'
+        if not analyzer.exists():
+            print(f'Warning: output analysis script not found: {analyzer}')
+            return
+
+        run_dir = self.run_manager.run_dir.resolve()
+        print(f'Running output analysis for {run_dir} ...')
+        try:
+            subprocess.run(
+                [sys.executable, str(analyzer), '--run', str(run_dir)],
+                cwd=str(repo_root),
+                check=True,
+            )
+        except Exception as exc:
+            print(f'Warning: output analysis failed for {run_dir}: {exc}')
+
     def run(self) -> None:
+        completed_training = False
         try:
             (
                 kan_init,
@@ -1768,8 +1792,11 @@ class VMCTrainer:
                 log_network=log_network,
                 extend_mkan_grid=extend_mkan_grid,
             )
+            completed_training = True
         finally:
             self.run_manager.close()
+            if completed_training:
+                self._run_output_analysis()
 
 
 def train(cfg: ml_collections.ConfigDict):

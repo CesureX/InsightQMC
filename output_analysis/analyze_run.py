@@ -13,7 +13,10 @@ import argparse
 import csv
 import json
 import math
+import os
+import pickle
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -192,6 +195,202 @@ def _plot_series(ax, item: ScalarSeries, title: str, rolling: int = 1) -> None:
     ax.grid(True, alpha=0.25)
 
 
+def _checkpoint_step(path: Path) -> int:
+    match = re.search(r"train_step_(\d+)\.pkl$", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _latest_train_checkpoint(run_dir: Path) -> Path | None:
+    checkpoint_dir = run_dir / "checkpoints"
+    if not checkpoint_dir.exists():
+        return None
+    train_checkpoints = sorted(
+        checkpoint_dir.glob("train_step_*.pkl"),
+        key=_checkpoint_step,
+    )
+    if train_checkpoints:
+        return train_checkpoints[-1]
+    last_checkpoint = checkpoint_dir / "last.pkl"
+    if last_checkpoint.exists():
+        return last_checkpoint
+    checkpoints = sorted(checkpoint_dir.glob("*.pkl"))
+    return checkpoints[-1] if checkpoints else None
+
+
+def _is_array_like(value) -> bool:
+    return hasattr(value, "shape") and hasattr(value, "dtype")
+
+
+def _count_array_tree(value) -> int:
+    if _is_array_like(value):
+        return int(np.prod(value.shape, dtype=np.int64))
+    if isinstance(value, dict):
+        return sum(_count_array_tree(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_count_array_tree(item) for item in value)
+    if hasattr(value, "items"):
+        return sum(_count_array_tree(item) for _, item in value.items())
+    return 0
+
+
+def _ensure_repo_root_importable(run_dir: Path) -> None:
+    for parent in (run_dir, *run_dir.parents):
+        if (parent / "networks.py").exists():
+            repo_root = str(parent)
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            return
+
+
+def _count_checkpoint_params(run_dir: Path) -> tuple[int | None, Path | None]:
+    checkpoint = _latest_train_checkpoint(run_dir)
+    if checkpoint is None:
+        return None, None
+
+    # Keep analysis from probing/allocating large GPU buffers when unpickling
+    # JAX arrays from a checkpoint.
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    _ensure_repo_root_importable(run_dir)
+    try:
+        with checkpoint.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception as exc:
+        print(f"Warning: could not read checkpoint for parameter count: {checkpoint} ({exc})")
+        return None, checkpoint
+
+    params = payload.get("params") if isinstance(payload, dict) else None
+    if params is None:
+        return None, checkpoint
+    return _count_array_tree(params), checkpoint
+
+
+def _training_speed(series: dict[str, ScalarSeries]) -> tuple[float | None, float | None, int | None, int | None, int | None]:
+    item = series.get("train/loss")
+    if item is None or len(item.steps) < 2:
+        return None, None, None, None, None
+
+    finite = np.isfinite(item.wall_times)
+    steps = item.steps[finite]
+    wall_times = item.wall_times[finite]
+    if len(steps) < 2:
+        return None, None, None, None, None
+
+    duration = float(wall_times[-1] - wall_times[0])
+    step_delta = int(steps[-1] - steps[0])
+    logged_points = int(len(steps))
+    if duration <= 0.0 or step_delta <= 0:
+        return None, None, int(steps[0]), int(steps[-1]), logged_points
+    return duration, float(step_delta / duration), int(steps[0]), int(steps[-1]), logged_points
+
+
+def _format_count(value: int | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:,}"
+
+
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(seconds):
+        return "N/A"
+    if seconds >= 3600.0:
+        return f"{seconds / 3600.0:.3f} h"
+    if seconds >= 60.0:
+        return f"{seconds / 60.0:.2f} min"
+    return f"{seconds:.2f} s"
+
+
+def _format_rate(rate: float | None) -> str:
+    if rate is None or not math.isfinite(rate):
+        return "N/A"
+    return f"{rate:.2f} it/s"
+
+
+def _read_layer_dims(run_dir: Path) -> str:
+    config_path = run_dir / "config.json"
+    if not config_path.exists():
+        return "N/A"
+    try:
+        config = json.loads(config_path.read_text())
+    except Exception as exc:
+        print(f"Warning: could not read config for layer_dims: {config_path} ({exc})")
+        return "N/A"
+    layer_dims = config.get("layer_dims")
+    if layer_dims is None:
+        return "N/A"
+    return json.dumps(layer_dims, separators=(",", ":"))
+
+
+def _last_fraction_energy(
+    series: dict[str, ScalarSeries],
+    fraction: float = 0.1,
+) -> tuple[float | None, float | None, int]:
+    item = series.get("train/loss")
+    if item is None or len(item.values) == 0:
+        return None, None, 0
+
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    tail_count = max(1, int(math.ceil(len(item.values) * fraction)))
+    values = np.asarray(item.values[-tail_count:], dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None, None, 0
+    mean = float(np.mean(values))
+    sem = (
+        float(np.std(values, ddof=1) / math.sqrt(values.size))
+        if values.size > 1
+        else math.nan
+    )
+    return mean, sem, int(values.size)
+
+
+def _format_energy_sem(mean: float | None, sem: float | None) -> str:
+    if mean is None:
+        return "N/A"
+    if sem is None or not math.isfinite(sem):
+        return f"{mean:.8f}"
+    return f"{mean:.8f} ± {sem:.2e}"
+
+
+def _display_run_dir(run_dir: Path) -> str:
+    try:
+        cwd = Path.cwd().resolve()
+        return str(run_dir.resolve().relative_to(cwd))
+    except ValueError:
+        return str(run_dir)
+
+
+def _add_training_metadata_table(ax, series: dict[str, ScalarSeries], run_dir: Path) -> None:
+    param_count, _ = _count_checkpoint_params(run_dir)
+    duration, rate, _, last_step, _ = _training_speed(series)
+    total_steps = "N/A" if last_step is None else f"{last_step:,}"
+    tail_mean, tail_sem, tail_count = _last_fraction_energy(series, fraction=0.1)
+
+    ax.set_axis_off()
+    table = ax.table(
+        cellText=[
+            [
+                f"output: {_display_run_dir(run_dir)}",
+                f"layer_dims: {_read_layer_dims(run_dir)}",
+                f"params: {_format_count(param_count)}; steps: {total_steps}",
+            ],
+            [
+                f"train time: {_format_duration(duration)}",
+                f"train speed: {_format_rate(rate)}",
+                f"last 10% energy: {_format_energy_sem(tail_mean, tail_sem)} (n={tail_count:,})",
+            ],
+        ],
+        cellLoc="center",
+        loc="center",
+        colWidths=[0.45, 0.22, 0.33],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5)
+    table.scale(1.0, 1.35)
+    for cell in table.get_celld().values():
+        cell.set_edgecolor("#c8c8c8")
+        cell.set_linewidth(0.6)
+
+
 def _adaptive_ylim(
     values: np.ndarray,
     *,
@@ -227,7 +426,7 @@ def _adaptive_ylim(
     return low, high
 
 
-def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None) -> None:
+def make_plots(series: dict[str, ScalarSeries], run_dir: Path, out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None) -> None:
     if plt is None:
         raise RuntimeError(f"matplotlib is unavailable: {_MATPLOTLIB_ERROR}")
 
@@ -242,7 +441,14 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
         else None
     )
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
+    fig = plt.figure(figsize=(13, 8.8), constrained_layout=True)
+    grid = fig.add_gridspec(3, 2, height_ratios=[0.32, 1.0, 1.0])
+    meta_ax = fig.add_subplot(grid[0, :])
+    _add_training_metadata_table(meta_ax, series, run_dir)
+    axes = np.array([
+        [fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])],
+        [fig.add_subplot(grid[2, 0]), fig.add_subplot(grid[2, 1])],
+    ])
     plots = [
         ("train/loss", "train/loss", 100, training_loss_ylim),
         ("train/variance", "train/variance", 100, variance_ylim),
@@ -369,7 +575,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         if plt is None:
             print(f"Warning: matplotlib is unavailable, skipping plots: {_MATPLOTLIB_ERROR}")
         else:
-            make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction)
+            make_plots(series, run_dir, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction)
     print(f"Loaded {len(series)} scalar tags from {run_dir}")
     print(f"Wrote analysis to {out_dir}")
     print_summary(summary)
