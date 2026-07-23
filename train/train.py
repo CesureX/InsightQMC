@@ -120,6 +120,7 @@ class VMCTrainer:
             batch_size=self.batch_size,
             pretrain_mcmc_steps=self.pretrain_mcmc_steps,
             pretrain_mcmc_width=self.pretrain_mcmc_width,
+            pretrain_mcmc_method=self.pretrain_mcmc_method,
             full_det=self.full_det,
             debug=self.debug,
             scalar_pretrain=False,
@@ -164,8 +165,12 @@ class VMCTrainer:
         self.dft_grid_level = cfg.get('dft_grid_level', 3)
         self.pyscf_mol = cfg.system.get('pyscf_mol')
 
+        self.mcmc_method = str(cfg.get('mcmc_method', 'mala')).lower()
         self.mcmc_steps = int(cfg.mcmc_steps)
         self.mcmc_width = float(cfg.mcmc_width)
+        self.pretrain_mcmc_method = str(
+            cfg.get('pretrain_mcmc_method', self.mcmc_method)
+        ).lower()
         self.pretrain_mcmc_steps = int(cfg.get('pretrain_mcmc_steps', 1))
         self.pretrain_mcmc_width = float(cfg.get('pretrain_mcmc_width', 0.02))
 
@@ -228,6 +233,8 @@ class VMCTrainer:
         self.jastrow_ee = bool(jastrow_cfg.get('ee', True))
         self.jastrow_en = bool(jastrow_cfg.get('en', False))
         self.jastrow_en_order = int(jastrow_cfg.get('en_radial_order', 4))
+        self.jastrow_en_mode = str(jastrow_cfg.get('en_mode', 'fixed_cusp')).lower()
+        jastrow.en_jastrow_uses_fixed_cusp(self.jastrow_en_mode)
         self.jastrow_type = str(jastrow_cfg.get('type', 'pade')).lower()
         self.jastrow_radial_order = int(jastrow_cfg.get('radial_order', 4))
 
@@ -518,7 +525,11 @@ class VMCTrainer:
         jastrow_uses_r_ae = self.jastrow_type == 'ferminet_three_body'
         jastrow_params = init_jastrow() if self.jastrow_ee else None
         jastrow_en_params = (
-            jastrow.init_one_body_en_jastrow(self.natoms, self.jastrow_en_order)
+            jastrow.init_one_body_en_jastrow(
+                self.natoms,
+                self.jastrow_en_order,
+                mode=self.jastrow_en_mode,
+            )
             if self.jastrow_en
             else None
         )
@@ -657,15 +668,6 @@ class VMCTrainer:
                 ae_channels = [
                     channel for channel, spin in zip(ae_channels, self.electrons) if spin > 0
                 ]
-                theta, phi = envelope.angular_coordinates(ae)
-                theta_channels = jnp.split(theta, spin_partitions, axis=0)
-                theta_channels = [
-                    channel for channel, spin in zip(theta_channels, self.electrons) if spin > 0
-                ]
-                phi_channels = jnp.split(phi, spin_partitions, axis=0)
-                phi_channels = [
-                    channel for channel, spin in zip(phi_channels, self.electrons) if spin > 0
-                ]
                 if self.envelope_type == 'isotropic':
                     apply_envelope = envelope.apply_isotropic_envelope
                 elif self.envelope_type == 'chebyshev':
@@ -696,15 +698,13 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             r_ae=r_ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
+                            ae=ae_channel,
                             **envelope_param,
                         )
-                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, r_ae_channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
-                            theta_channels,
-                            phi_channels,
+                            ae_channels,
                             params['envelope'],
                         )
                     ]
@@ -713,15 +713,13 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             r_ae=r_ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
+                            ae=ae_channel,
                             **envelope_param,
                         )
-                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, r_ae_channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
-                            theta_channels,
-                            phi_channels,
+                            ae_channels,
                             params['envelope'],
                         )
                     ]
@@ -730,15 +728,13 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             r_ae=r_ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
+                            ae=ae_channel,
                             **envelope_param,
                         )
-                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, r_ae_channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
-                            theta_channels,
-                            phi_channels,
+                            ae_channels,
                             params['envelope'],
                         )
                     ]
@@ -747,15 +743,11 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             ae=ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
                             **envelope_param,
                         )
-                        for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             ae_channels,
-                            theta_channels,
-                            phi_channels,
                             params['envelope'],
                         )
                     ]
@@ -813,7 +805,9 @@ class VMCTrainer:
                         raise ValueError('Missing Jastrow parameters for electron-nucleus Jastrow.')
                     logmag = logmag + jastrow.apply_one_body_en_jastrow(
                         r_ae,
+                        charges,
                         params['jastrow_en'],
+                        mode=self.jastrow_en_mode,
                     )
             return phase, logmag
 
@@ -1120,12 +1114,35 @@ class VMCTrainer:
                     changed = True
 
         if self.jastrow_en:
-            target = jastrow.init_one_body_en_jastrow(self.natoms, self.jastrow_en_order)
+            existing_en_params = new_params.get('jastrow_en', None)
+            resume_uses_fixed_cusp = jastrow.en_jastrow_uses_fixed_cusp(
+                self.jastrow_en_mode,
+                params=existing_en_params,
+            )
+            target = jastrow.init_one_body_en_jastrow(
+                self.natoms,
+                self.jastrow_en_order,
+                mode='fixed_cusp' if resume_uses_fixed_cusp else 'legacy',
+            )
             if 'jastrow_en' not in new_params:
                 new_params['jastrow_en'] = target
                 changed = True
             else:
                 en_params = dict(new_params['jastrow_en'])
+                if resume_uses_fixed_cusp:
+                    if 'en_alpha' not in en_params:
+                        en_params['en_alpha'] = target['en_alpha']
+                        changed = True
+                    else:
+                        resized, did_resize = self._resize_1d_param(
+                            en_params['en_alpha'],
+                            target['en_alpha'].shape[0],
+                        )
+                        en_params['en_alpha'] = resized
+                        changed = changed or did_resize
+                elif 'en_alpha' in en_params:
+                    en_params.pop('en_alpha')
+                    changed = True
                 if 'en_coeff' not in en_params:
                     en_params['en_coeff'] = target['en_coeff']
                     changed = True
@@ -1569,6 +1586,7 @@ class VMCTrainer:
             nelectrons=self.nelectrons,
             steps=self.mcmc_steps,
             jit=not self.use_pmap,
+            method=self.mcmc_method,
         )
         step_fn = make_training_step(
             mcmc_step=monte_carlo,

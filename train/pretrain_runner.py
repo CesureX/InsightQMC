@@ -30,6 +30,7 @@ class PretrainRunner:
         batch_size: int,
         pretrain_mcmc_steps: int,
         pretrain_mcmc_width: float,
+        pretrain_mcmc_method: str,
         full_det: bool,
         debug: bool,
         scalar_pretrain: bool = False,
@@ -61,6 +62,7 @@ class PretrainRunner:
         self.batch_size = batch_size
         self.pretrain_mcmc_steps = pretrain_mcmc_steps
         self.pretrain_mcmc_width = pretrain_mcmc_width
+        self.pretrain_mcmc_method = pretrain_mcmc_method
         self.full_det = full_det
         self.debug = debug
         self.scalar_pretrain = scalar_pretrain
@@ -146,6 +148,7 @@ class PretrainRunner:
                         phase_weight=self.phase_weight,
                         mcmc_steps=self.pretrain_mcmc_steps,
                         mcmc_width=self.pretrain_mcmc_width,
+                        mcmc_method=self.pretrain_mcmc_method,
                         start_iteration=pretrain_start_step,
                         opt_state=pretrain_opt_state,
                         data=data,
@@ -175,6 +178,7 @@ class PretrainRunner:
                     full_det=self.full_det,
                     mcmc_steps=self.pretrain_mcmc_steps,
                     mcmc_width=self.pretrain_mcmc_width,
+                    mcmc_method=self.pretrain_mcmc_method,
                     start_iteration=pretrain_start_step,
                     opt_state=pretrain_opt_state,
                     data=data,
@@ -220,6 +224,7 @@ class PretrainRunner:
                         phase_weight=self.phase_weight,
                         mcmc_steps=self.pretrain_mcmc_steps,
                         mcmc_width=self.pretrain_mcmc_width,
+                        mcmc_method=self.pretrain_mcmc_method,
                         start_iteration=pretrain_start_step,
                         opt_state=pretrain_opt_state,
                         data=data,
@@ -248,6 +253,7 @@ class PretrainRunner:
                     full_det=self.full_det,
                     mcmc_steps=self.pretrain_mcmc_steps,
                     mcmc_width=self.pretrain_mcmc_width,
+                    mcmc_method=self.pretrain_mcmc_method,
                     start_iteration=pretrain_start_step,
                     opt_state=pretrain_opt_state,
                     data=data,

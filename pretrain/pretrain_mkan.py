@@ -24,6 +24,7 @@ def make_pretrain_step(
     phase_weight: float = 1.0e-2,
     mcmc_steps: int = 1,
     mcmc_width: float = 0.02,
+    mcmc_method: str = 'mala',
     mcmc_jit: bool = True,
 ):
   """Creates one MKAN scalar pretraining step.
@@ -63,6 +64,7 @@ def make_pretrain_step(
       nelectrons=sum(electrons),
       steps=mcmc_steps,
       jit=mcmc_jit,
+      method=mcmc_method,
   )
 
   def loss_fn(params, data: networks.KANetsData, scf_approx):
@@ -123,6 +125,7 @@ def pretrain_scalar_wavefunction(
     phase_weight: float = 1.0e-2,
     mcmc_steps: int = 1,
     mcmc_width: float = 0.02,
+    mcmc_method: str = 'mala',
     start_iteration: int = 0,
     opt_state: Optional[optax.OptState] = None,
     data: Optional[networks.KANetsData] = None,
@@ -144,6 +147,7 @@ def pretrain_scalar_wavefunction(
       phase_weight=phase_weight,
       mcmc_steps=mcmc_steps,
       mcmc_width=mcmc_width,
+      mcmc_method=mcmc_method,
       mcmc_jit=not use_pmap,
   )
   if use_pmap:

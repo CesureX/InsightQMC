@@ -10,7 +10,7 @@ From the `QMC_LZW` directory:
 
 ```bash
 conda run -p /vepfs-mlp2/c20250516/250504030/env/qmc python output_analysis/analyze_run.py \
-  --run outputs/Li07201340_with_M_largeparameters1
+  --run outputs/Li2_07230030with_M_largeparameters1_chebyshev_fixedcusp_random
 ```
 
 Outputs are written to `<run>/analysis/` by default:

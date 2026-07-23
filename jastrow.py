@@ -86,12 +86,41 @@ def init_ferminet_three_body_jastrow(radial_order: int = 4) -> dict[str, Array]:
     return params
 
 
-def init_one_body_en_jastrow(natom: int, radial_order: int = 4) -> dict[str, Array]:
-    """Initialize a bounded electron-nucleus one-body Jastrow correction."""
+def init_one_body_en_jastrow(
+    natom: int,
+    radial_order: int = 4,
+    mode: str = "fixed_cusp",
+) -> dict[str, Array]:
+    """Initialize an electron-nucleus Jastrow.
 
-    return {
-        "en_coeff": jnp.zeros((int(natom), int(radial_order))),
-    }
+    ``mode='legacy'`` is the original pure polynomial correction used by older
+    checkpoints. ``mode='fixed_cusp'`` adds a fixed Kato electron-nucleus cusp
+    plus trainable higher-order radial corrections.
+    """
+
+    params = {"en_coeff": jnp.zeros((int(natom), int(radial_order)))}
+    if en_jastrow_uses_fixed_cusp(mode):
+        params["en_alpha"] = jnp.ones((int(natom),))
+    return params
+
+
+def en_jastrow_uses_fixed_cusp(
+    mode: str,
+    params: Mapping[str, Array] | None = None,
+) -> bool:
+    """Return whether the electron-nucleus Jastrow should include Kato cusp."""
+
+    mode = str(mode).lower()
+    if mode in ("fixed_cusp", "cusp", "kato"):
+        return True
+    if mode in ("legacy", "polynomial", "poly"):
+        return False
+    if mode == "auto":
+        return params is None or "en_alpha" in params
+    raise ValueError(
+        "jastrow.en_mode must be 'fixed_cusp', 'legacy', or 'auto'. "
+        f"Got {mode!r}."
+    )
 
 
 def _pair_distances(r_ee: Array, pair_indices: Array) -> Array:
@@ -148,14 +177,36 @@ def _three_body_correction(
 
 def apply_one_body_en_jastrow(
     r_ae: Array,
+    charges: Array,
     params: Mapping[str, Array],
+    mode: str = "fixed_cusp",
 ) -> Array:
-    """Evaluate a bounded trainable electron-nucleus Jastrow correction."""
+    """Evaluate the electron-nucleus Jastrow.
 
+    In ``legacy`` mode this is the old trainable polynomial correction in
+    ``x = r/(1+r)``. In ``fixed_cusp`` mode, each electron-nucleus pair has
+    the cusp term
+        -Z_A r_iA / (1 + alpha_A r_iA)
+    whose derivative is -Z_A at r_iA = 0. The additional trainable correction
+    begins at second order and therefore preserves that derivative.
+    """
+
+    r = r_ae[..., 0]
     coeff = params["en_coeff"]
-    x = r_ae[..., 0] / (1.0 + r_ae[..., 0])
-    powers = x[..., None] ** jnp.arange(1, coeff.shape[-1] + 1)
-    return jnp.sum(powers * coeff[None, ...])
+    x = r / (1.0 + r)
+    if not en_jastrow_uses_fixed_cusp(mode, params=params):
+        powers = x[..., None] ** jnp.arange(1, coeff.shape[-1] + 1)
+        return jnp.sum(powers * coeff[None, ...])
+
+    alpha_param = params.get(
+        "en_alpha",
+        jnp.ones((charges.shape[0],), dtype=r.dtype),
+    )
+    alpha = jnp.abs(alpha_param) + 1.0e-4
+    cusp = -charges[None, :] * r / (1.0 + alpha[None, :] * r)
+    powers = x[..., None] ** jnp.arange(2, coeff.shape[-1] + 2)
+    correction = jnp.sum(powers * coeff[None, ...], axis=-1)
+    return jnp.sum(cusp + correction)
 
 
 def _sum_pair_cusps(

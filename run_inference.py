@@ -356,6 +356,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         raise ValueError(f'Unsupported jastrow.type={jastrow_type!r}.')
     jastrow_uses_r_ae = jastrow_type == 'ferminet_three_body'
     jastrow_en = bool(cfg.get('jastrow', {}).get('en', False))
+    jastrow_en_mode = str(cfg.get('jastrow', {}).get('en_mode', 'auto')).lower()
+    jastrow.en_jastrow_uses_fixed_cusp(jastrow_en_mode)
     active_spin_channels = networks.active_spin_channels(electrons)
     full_det = bool(cfg.get('full_det', True))
 
@@ -470,15 +472,6 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             ae_channels = [
                 channel for channel, spin in zip(ae_channels, electrons) if spin > 0
             ]
-            theta, phi = envelope.angular_coordinates(ae)
-            theta_channels = jnp.split(theta, spin_partitions, axis=0)
-            theta_channels = [
-                channel for channel, spin in zip(theta_channels, electrons) if spin > 0
-            ]
-            phi_channels = jnp.split(phi, spin_partitions, axis=0)
-            phi_channels = [
-                channel for channel, spin in zip(phi_channels, electrons) if spin > 0
-            ]
             envelope_type = str(cfg.get('envelope_type', 'isotropic')).lower()
             if envelope_type == 'isotropic':
                 apply_envelope = envelope.apply_isotropic_envelope
@@ -510,15 +503,13 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     channel
                     * apply_envelope(
                         r_ae=r_ae_channel,
-                        theta=theta_channel,
-                        phi=phi_channel,
+                        ae=ae_channel,
                         **envelope_param,
                     )
-                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                    for channel, r_ae_channel, ae_channel, envelope_param in zip(
                         orbital_channels,
                         r_ae_channels,
-                        theta_channels,
-                        phi_channels,
+                        ae_channels,
                         params['envelope'],
                     )
                 ]
@@ -527,15 +518,13 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     channel
                     * apply_envelope(
                         r_ae=r_ae_channel,
-                        theta=theta_channel,
-                        phi=phi_channel,
+                        ae=ae_channel,
                         **envelope_param,
                     )
-                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                    for channel, r_ae_channel, ae_channel, envelope_param in zip(
                         orbital_channels,
                         r_ae_channels,
-                        theta_channels,
-                        phi_channels,
+                        ae_channels,
                         params['envelope'],
                     )
                 ]
@@ -544,15 +533,13 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     channel
                     * apply_envelope(
                         r_ae=r_ae_channel,
-                        theta=theta_channel,
-                        phi=phi_channel,
+                        ae=ae_channel,
                         **envelope_param,
                     )
-                    for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                    for channel, r_ae_channel, ae_channel, envelope_param in zip(
                         orbital_channels,
                         r_ae_channels,
-                        theta_channels,
-                        phi_channels,
+                        ae_channels,
                         params['envelope'],
                     )
                 ]
@@ -561,15 +548,11 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                     channel
                     * apply_envelope(
                         ae=ae_channel,
-                        theta=theta_channel,
-                        phi=phi_channel,
                         **envelope_param,
                     )
-                    for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                    for channel, ae_channel, envelope_param in zip(
                         orbital_channels,
                         ae_channels,
-                        theta_channels,
-                        phi_channels,
                         params['envelope'],
                     )
                 ]
@@ -621,7 +604,9 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             if jastrow_en:
                 logmag = logmag + jastrow.apply_one_body_en_jastrow(
                     r_ae,
+                    charges_,
                     params['jastrow_en'],
+                    mode=jastrow_en_mode,
                 )
         return phase, logmag
 

@@ -5,13 +5,13 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 8192,
-        'layer_dims': [12, 16, 16, 16, 24],
+        'batch_size': 32768,
+        'layer_dims': [8, 48, 48, 48, 64],
         'g': [10],
-        'k': [3], 
+        'k': [10],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'grid_range': [-4, 4],
-        'iterations': 100000,
+        'grid_range': [-3, 3],
+        'iterations': 150000,
         'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
@@ -26,10 +26,12 @@ def default() -> ml_collections.ConfigDict:
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 12,
+        'nfeatures': 8,
         'orbital_features': 'ee_aggregate',
+        'mcmc_method': 'random_walk', # mala: guided/Langevin; random_walk: FermiNet-style Gaussian proposal
+        'pretrain_mcmc_method': 'random_walk',
         'mcmc_steps': 10,
-        'mcmc_width': 0.02, #0.02 for C
+        'mcmc_width': 0.02,
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
         'clip_local_energy': 5.0,
@@ -38,7 +40,7 @@ def default() -> ml_collections.ConfigDict:
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
         'ndeterminants': 16,
         'determinant_weights': True,
-        'laplacian_method': 'default',
+        'laplacian_method': 'folx', # default or folx
         't_init': 0,
         'debug': False,
         'learning_rate': 0.00004,
@@ -52,22 +54,22 @@ def default() -> ml_collections.ConfigDict:
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
         'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
-        'envelope_degree': 0,
+        'envelope_degree': 1,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
-            # [r_ae, ae, ee_density, ee_vec] for LiH when orbital_features='ee_aggregate'.
+            # [r_ae, ae, ee_density, ee_vec] when orbital_features='ee_aggregate'.
             # The final output is 2 * ndeterminants * nelectrons real channels when
-            'layer_type': 'base',       # 原始 KAN B-spline
+            #'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
-            #'layer_type': 'chebyshev',
+            'layer_type': 'chebyshev',
             # 'layer_type': 'legendre'
             # 'layer_type': 'rbf'
             # 'layer_type': 'sine'
             # 'layer_type': 'fourier'
             'input_dim': None,
-            'output_dim': 24,
+            'output_dim': 64,
             # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
             'width': None,
             'mult_arity': 2,
@@ -102,23 +104,23 @@ def default() -> ml_collections.ConfigDict:
         },
         'system': {
             'molecule': [
-                system.Atom('Li', (0, 0, 0)),
-                system.Atom('H', (0, 0, 3.015)),
+                system.Atom('C', (0.0, 0.0, 0.0)),
             ],
-            'electrons': (2,2), 
+            'electrons': (4, 2),
         },
         'jastrow': {
             'ee': True, 
             'en': True,
-            'en_radial_order': 4,
-            'radial_order': 4,
+            'en_mode': 'fixed_cusp', # legacy keeps old pure-polynomial J_en for old checkpoints; fixed_cusp adds Kato electron-nucleus cusp
+            'en_radial_order': 6,
+            'radial_order': 6,
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/LiH07202150_with_M_largeparameters1',
-            'checkpoint_every': 1000,
+            'root_dir': 'outputs/C07230057_with_M_70k_superparameters_chebyshev',
+            'checkpoint_every': 10000,
             'metrics_every': 5,
-            'resume': True,
+            'resume': False,
             'enable_tensorboard': True,
         },
     })

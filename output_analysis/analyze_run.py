@@ -130,7 +130,7 @@ def load_scalars(run_dir: Path) -> dict[str, ScalarSeries]:
         return _load_csv_scalars(run_dir)
 
     if event_accumulator is None:
-        raise RuntimeError(f"TensorBoard event reader is unavailable: {_TENSORBOARD_ERROR}")
+        return _load_csv_scalars(run_dir)
 
     grouped: dict[str, tuple[list[int], list[float], list[float]]] = {}
     for event_file in event_files:
@@ -192,29 +192,60 @@ def _plot_series(ax, item: ScalarSeries, title: str, rolling: int = 1) -> None:
     ax.grid(True, alpha=0.25)
 
 
-def _loss_ylims_for_run(run_dir: Path) -> tuple[tuple[float, float], tuple[float, float]]:
-    config_path = run_dir / "config.json"
-    try:
-        with config_path.open() as handle:
-            cfg = json.load(handle)
-    except FileNotFoundError:
-        return (-40.0, -30.0), (-40.0, -35.0)
-    molecule = cfg.get("system", {}).get("molecule", [])
-    symbols = {str(atom.get("symbol", "")).upper() for atom in molecule if isinstance(atom, dict)}
-    if symbols == {"H"}:
-        return (-1.0, 1.0), (-1.0, 1.0)
-    if symbols == {"LI"}:
-        return (-8.0, -7.0), (-8.0, -7.0)
-    return (-40.0, -30.0), (-40.0, -35.0)
+def _adaptive_ylim(
+    values: np.ndarray,
+    *,
+    lower_quantile: float = 0.01,
+    upper_quantile: float = 0.99,
+    pad_fraction: float = 0.08,
+    include_zero: bool = False,
+) -> tuple[float, float] | None:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return None
 
-def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None, training_loss_ylim: tuple[float, float], tail_loss_ylim: tuple[float, float]) -> None:
+    lower_quantile = min(max(lower_quantile, 0.0), 1.0)
+    upper_quantile = min(max(upper_quantile, lower_quantile), 1.0)
+    low, high = np.quantile(finite, [lower_quantile, upper_quantile])
+    if include_zero:
+        low = min(0.0, float(low))
+    low = float(low)
+    high = float(high)
+
+    if math.isclose(low, high, rel_tol=0.0, abs_tol=1.0e-12):
+        center = low
+        pad = max(abs(center) * pad_fraction, 1.0e-6)
+        low, high = center - pad, center + pad
+    else:
+        pad = (high - low) * pad_fraction
+        low -= pad
+        high += pad
+
+    if include_zero:
+        low = min(0.0, low)
+    return low, high
+
+
+def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None) -> None:
     if plt is None:
         raise RuntimeError(f"matplotlib is unavailable: {_MATPLOTLIB_ERROR}")
+
+    training_loss_ylim = (
+        _adaptive_ylim(series["train/loss"].values, lower_quantile=0.005, upper_quantile=0.995)
+        if "train/loss" in series
+        else None
+    )
+    variance_ylim = (
+        _adaptive_ylim(series["train/variance"].values, lower_quantile=0.0, upper_quantile=0.99, include_zero=True)
+        if "train/variance" in series
+        else None
+    )
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
     plots = [
         ("train/loss", "train/loss", 100, training_loss_ylim),
-        ("train/variance", "train/variance", 100, (0.0, 10000.0)),
+        ("train/variance", "train/variance", 100, variance_ylim),
         ("train/pmove", "train/pmove", 100, None),
         ("train/mcmc_width", "train/mcmc_width", 1, None),
     ]
@@ -232,8 +263,8 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
     if "train/loss" in series:
         fig, ax = plt.subplots(figsize=(10, 4.8), constrained_layout=True)
         _plot_series(ax, series["train/loss"], "train/loss", rolling=100)
-        ax.set_ylim(*training_loss_ylim)
-        ax.set_xlim(0, 15000)
+        if training_loss_ylim is not None:
+            ax.set_ylim(*training_loss_ylim)
         ax.set_ylabel("energy / Eh")
         ax.set_title("train/loss")
         fig.savefig(out_dir / "train_loss.png", dpi=180)
@@ -256,7 +287,13 @@ def make_plots(series: dict[str, ScalarSeries], out_dir: Path, tail: int | None,
                     alpha=0.18,
                     label=f"naive SEM = {sem:.2e} Eh",
                 )
-            ax.set_ylim(*tail_loss_ylim)
+            tail_loss_ylim = _adaptive_ylim(
+                tail_series.values,
+                lower_quantile=0.01,
+                upper_quantile=0.99,
+            )
+            if tail_loss_ylim is not None:
+                ax.set_ylim(*tail_loss_ylim)
             ax.set_title("train/loss tail statistics")
             ax.set_xlabel("step")
             ax.set_ylabel("energy / Eh")
@@ -323,8 +360,6 @@ def main(argv: Iterable[str] | None = None) -> None:
     tail = None if args.tail in (None, 0) else args.tail
     tail_fraction = None if args.tail is not None else args.tail_fraction
 
-    training_loss_ylim, tail_loss_ylim = _loss_ylims_for_run(run_dir)
-
     series = load_scalars(run_dir)
     write_csv(series, out_dir)
     summary = summarize(series, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction)
@@ -334,7 +369,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         if plt is None:
             print(f"Warning: matplotlib is unavailable, skipping plots: {_MATPLOTLIB_ERROR}")
         else:
-            make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction, training_loss_ylim=training_loss_ylim, tail_loss_ylim=tail_loss_ylim)
+            make_plots(series, out_dir, tail=tail, burnin_step=args.burnin_step, tail_fraction=tail_fraction)
     print(f"Loaded {len(series)} scalar tags from {run_dir}")
     print(f"Wrote analysis to {out_dir}")
     print_summary(summary)
