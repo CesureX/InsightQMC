@@ -8,7 +8,8 @@ def default() -> ml_collections.ConfigDict:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     cfg = ml_collections.ConfigDict({
-        'batch_size': 32768,
+        # 'batch_size': 32768,
+        'batch_size': 8192,
         'layer_dims': [8, 8, 8, 6],
         'g': [10],
         'k': [3], #7
@@ -45,9 +46,38 @@ def default() -> ml_collections.ConfigDict:
         'laplacian_method': 'default',
         't_init': 0,
         'debug': False,
+        # Optimizer used for the VMC energy minimization. Pretraining always
+        # uses Adam. Supported values: 'adam', 'adamw', 'rgn', 'kfac'.
+        'optimizer': 'kfac',
         'learning_rate': 0.00002,
         'learning_rate_decay': 50000.0,
         'gradient_clip_norm': 1.0,
+        'adamw': {
+            # Decoupled weight decay applied to all trainable parameters.
+            'weight_decay': 1.0e-4,
+        },
+        'rgn': {
+            # Compile MCMC and the RGN/CG solve as two separate executables.
+            'split_compilation': True,
+            # P = H_RGN + (S + eta I) / epsilon.
+            'epsilon': 0.01,
+            'eta': 1.0e-3,
+            'cg_maxiter': 20,
+            'cg_tol': 1.0e-4,
+            # Optional conservative scaling of the solved RGN direction.
+            'step_scale': 1.0,
+            'max_update_norm': 0.1,
+        },
+        'kfac': {
+            'damping': 1.0e-3,
+            'min_damping': 1.0e-4,
+            'norm_constraint': 1.0e-3,
+            'cov_ema_decay': 0.95,
+            'invert_every': 1,
+            'l2_reg': 0.0,
+            # InsightQMC's KAN layers do not provide custom KFAC tags.
+            'register_only_generic': True,
+        },
         'multi_device': True,
         # 0 means use all local JAX devices. batch_size is the global batch and
         # must be divisible by the number of devices used.
@@ -74,6 +104,9 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'rbf'
             # 'layer_type': 'sine'
             # 'layer_type': 'fourier'
+            # 'layer_type': 'fastkan'
+            # 'layer_type': 'relukan'
+            # 'layer_type': 'wavkan'
             'input_dim': None,
             'output_dim': None,
             # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.

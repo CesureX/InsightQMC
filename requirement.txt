@@ -1,8 +1,8 @@
-jax<0.5
-jaxlib<0.5
-tensorflow-probability==0.25.0
-distrax==0.1.5
-kfac-jax
+jax==0.10.0
+jaxlib==0.10.0
+tfp-nightly==0.26.0.dev20260628
+distrax==0.1.9
+kfac-jax @ git+https://github.com/google-deepmind/kfac-jax.git@e58fb9385fa2af862e6af98e7fec0f647f198ce0
 ml_collections
 optax
 flax
