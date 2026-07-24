@@ -266,6 +266,101 @@ def _real_spherical_harmonic_basis(theta: Array, phi: Array, degree: int) -> Arr
     return jnp.stack(values, axis=-1)
 
 
+def _associated_legendre_trig_components_from_cartesian(
+    ae: Array,
+    degree: int,
+    eps: float = 1.0e-12,
+) -> dict[tuple[int, int], tuple[Array, Array]]:
+    """Return P_l^m(z/r) cos(m phi) and P_l^m(z/r) sin(m phi).
+
+    The calculation uses Cartesian direction cosines and recurrence relations.
+    This is algebraically equivalent to the theta/phi implementation but avoids
+    differentiating through atan2 and arccos.
+    """
+
+    r = jnp.maximum(jnp.linalg.norm(ae, axis=-1), eps)
+    x = ae[..., 0] / r
+    y = ae[..., 1] / r
+    z = ae[..., 2] / r
+    zero = jnp.zeros_like(x)
+    one = jnp.ones_like(x)
+
+    components: dict[tuple[int, int], tuple[Array, Array]] = {(0, 0): (one, zero)}
+    if degree <= 0:
+        return components
+
+    components[(1, 0)] = (z, zero)
+    for l in range(2, degree + 1):
+        p_lm_minus_2, _ = components[(l - 2, 0)]
+        p_lm_minus_1, _ = components[(l - 1, 0)]
+        p_lm = ((2 * l - 1) * z * p_lm_minus_1 - (l - 1) * p_lm_minus_2) / l
+        components[(l, 0)] = (p_lm, zero)
+
+    real_power = one
+    imag_power = zero
+    double_factorial = 1.0
+    for m in range(1, degree + 1):
+        real_power, imag_power = (
+            real_power * x - imag_power * y,
+            real_power * y + imag_power * x,
+        )
+        double_factorial *= 2 * m - 1
+        scale = -double_factorial if m % 2 else double_factorial
+        p_mm_cos = scale * real_power
+        p_mm_sin = scale * imag_power
+        components[(m, m)] = (p_mm_cos, p_mm_sin)
+
+        if m < degree:
+            factor = 2 * m + 1
+            p_m1_m_cos = factor * z * p_mm_cos
+            p_m1_m_sin = factor * z * p_mm_sin
+            components[(m + 1, m)] = (p_m1_m_cos, p_m1_m_sin)
+
+        for l in range(m + 2, degree + 1):
+            p_lm_minus_2_cos, p_lm_minus_2_sin = components[(l - 2, m)]
+            p_lm_minus_1_cos, p_lm_minus_1_sin = components[(l - 1, m)]
+            denom = l - m
+            p_lm_cos = (
+                (2 * l - 1) * z * p_lm_minus_1_cos
+                - (l + m - 1) * p_lm_minus_2_cos
+            ) / denom
+            p_lm_sin = (
+                (2 * l - 1) * z * p_lm_minus_1_sin
+                - (l + m - 1) * p_lm_minus_2_sin
+            ) / denom
+            components[(l, m)] = (p_lm_cos, p_lm_sin)
+
+    return components
+
+
+def _real_spherical_harmonic_basis_from_cartesian(
+    ae: Array,
+    degree: int,
+    eps: float = 1.0e-12,
+) -> Array:
+    """Compute real spherical harmonics from Cartesian directions.
+
+    This produces the same basis/order as ``_real_spherical_harmonic_basis``:
+    for every l, channels are ordered by m=-l..l.  It avoids theta/phi and
+    therefore avoids the polar-axis derivative singularity from atan2/arccos.
+    """
+
+    components = _associated_legendre_trig_components_from_cartesian(ae, degree, eps)
+    values = []
+    for l in range(degree + 1):
+        for m_signed in range(-l, l + 1):
+            m = abs(m_signed)
+            p_lm_cos, p_lm_sin = components[(l, m)]
+            norm = _spherical_harmonic_norm(l, m)
+            if m_signed < 0:
+                values.append(math.sqrt(2.0) * norm * p_lm_sin)
+            elif m_signed == 0:
+                values.append(norm * p_lm_cos)
+            else:
+                values.append(math.sqrt(2.0) * norm * p_lm_cos)
+    return jnp.stack(values, axis=-1)
+
+
 def _complex_spherical_harmonic_basis(theta: Array, phi: Array, degree: int) -> Array:
     """Compute complex spherical harmonic basis up to angular momentum degree."""
 
@@ -278,6 +373,28 @@ def _complex_spherical_harmonic_basis(theta: Array, phi: Array, degree: int) -> 
             norm = _spherical_harmonic_norm(l, m)
             phase = jnp.cos(m * phi) + 1.0j * jnp.sin(m * phi)
             y_pos = norm * p_lm * phase
+            if m_signed < 0:
+                values.append(((-1.0) ** m) * jnp.conj(y_pos))
+            else:
+                values.append(y_pos)
+    return jnp.stack(values, axis=-1)
+
+
+def _complex_spherical_harmonic_basis_from_cartesian(
+    ae: Array,
+    degree: int,
+    eps: float = 1.0e-12,
+) -> Array:
+    """Compute complex spherical harmonics from Cartesian directions."""
+
+    components = _associated_legendre_trig_components_from_cartesian(ae, degree, eps)
+    values = []
+    for l in range(degree + 1):
+        for m_signed in range(-l, l + 1):
+            m = abs(m_signed)
+            p_lm_cos, p_lm_sin = components[(l, m)]
+            p_lm_phase = p_lm_cos + 1.0j * p_lm_sin
+            y_pos = _spherical_harmonic_norm(l, m) * p_lm_phase
             if m_signed < 0:
                 values.append(((-1.0) ** m) * jnp.conj(y_pos))
             else:
@@ -395,17 +512,21 @@ def init_angular_momentum_envelope(
 def apply_angular_momentum_envelope(
     *,
     r_ae: Array,
-    theta: Array,
-    phi: Array,
     sigma: Array,
     angular_coeff: Array,
+    ae: Array | None = None,
+    theta: Array | None = None,
+    phi: Array | None = None,
 ) -> Array:
     """Evaluate an exponential envelope modulated by angular-momentum functions.
 
     Args:
       r_ae: Electron-atom distances with shape (n_electrons_spin, natom, 1).
-      theta: Polar angles with shape (n_electrons_spin, natom).
-      phi: Azimuthal angles with shape (n_electrons_spin, natom).
+      ae: Electron-atom displacement vectors with shape
+        (n_electrons_spin, natom, 3). Preferred for l <= 1 because it avoids
+        spherical-coordinate derivative singularities.
+      theta: Optional polar angles with shape (n_electrons_spin, natom).
+      phi: Optional azimuthal angles with shape (n_electrons_spin, natom).
       sigma: Isotropic decay rates with shape (natom, output_dim).
       angular_coeff: Learnable coefficients with shape
         (natom, (degree + 1) ** 2, output_dim).
@@ -413,7 +534,12 @@ def apply_angular_momentum_envelope(
 
     basis_count = int(angular_coeff.shape[1])
     degree = int(round(math.sqrt(basis_count))) - 1
-    angular_basis = _real_spherical_harmonic_basis(theta, phi, degree)
+    if ae is not None:
+        angular_basis = _real_spherical_harmonic_basis_from_cartesian(ae, degree)
+    elif theta is not None and phi is not None:
+        angular_basis = _real_spherical_harmonic_basis(theta, phi, degree)
+    else:
+        raise ValueError("Need ae or theta/phi to evaluate angular envelope.")
     angular_modulation = jnp.einsum("nab,abo->nao", angular_basis, angular_coeff)
     isotropic_decay = jnp.exp(-r_ae * sigma)
     return jnp.sum(isotropic_decay * angular_modulation, axis=1)
@@ -457,11 +583,12 @@ def init_legendre_angular_envelope(
 def apply_legendre_angular_envelope(
     *,
     r_ae: Array,
-    theta: Array,
-    phi: Array,
     sigma: Array,
     p_basis: Array,
     angular_coeff: Array,
+    ae: Array | None = None,
+    theta: Array | None = None,
+    phi: Array | None = None,
 ) -> Array:
     """Evaluate exp(-sigma r) times radial Legendre and real angular sums."""
 
@@ -471,7 +598,12 @@ def apply_legendre_angular_envelope(
 
     angular_basis_count = int(angular_coeff.shape[1])
     angular_degree = int(round(math.sqrt(angular_basis_count))) - 1
-    angular_basis = _real_spherical_harmonic_basis(theta, phi, angular_degree)
+    if ae is not None:
+        angular_basis = _real_spherical_harmonic_basis_from_cartesian(ae, angular_degree)
+    elif theta is not None and phi is not None:
+        angular_basis = _real_spherical_harmonic_basis(theta, phi, angular_degree)
+    else:
+        raise ValueError("Need ae or theta/phi to evaluate Legendre-angular envelope.")
     angular_modulation = jnp.einsum("nab,abo->nao", angular_basis, angular_coeff)
 
     isotropic_decay = jnp.exp(-r_ae * sigma)
@@ -510,17 +642,23 @@ def init_complex_angular_momentum_envelope(
 def apply_complex_angular_momentum_envelope(
     *,
     r_ae: Array,
-    theta: Array,
-    phi: Array,
     sigma: Array,
     angular_coeff_real: Array,
     angular_coeff_imag: Array,
+    ae: Array | None = None,
+    theta: Array | None = None,
+    phi: Array | None = None,
 ) -> Array:
     """Evaluate an exponential envelope modulated by complex spherical harmonics."""
 
     basis_count = int(angular_coeff_real.shape[1])
     degree = int(round(math.sqrt(basis_count))) - 1
-    angular_basis = _complex_spherical_harmonic_basis(theta, phi, degree)
+    if ae is not None:
+        angular_basis = _complex_spherical_harmonic_basis_from_cartesian(ae, degree)
+    elif theta is not None and phi is not None:
+        angular_basis = _complex_spherical_harmonic_basis(theta, phi, degree)
+    else:
+        raise ValueError("Need ae or theta/phi to evaluate complex angular envelope.")
     angular_coeff = angular_coeff_real + 1.0j * angular_coeff_imag
     angular_modulation = jnp.einsum("nab,abo->nao", angular_basis, angular_coeff)
     isotropic_decay = jnp.exp(-r_ae * sigma)
@@ -565,11 +703,11 @@ def init_ferminet_angular_envelope(
 def apply_ferminet_angular_envelope(
     *,
     ae: Array,
-    theta: Array,
-    phi: Array,
     pi: Array,
     sigma: Array,
     angular_coeff: Array,
+    theta: Array | None = None,
+    phi: Array | None = None,
 ) -> Array:
     """Evaluate pi * exp(-|Sigma ae|) times a real angular-momentum sum."""
 
@@ -578,7 +716,7 @@ def apply_ferminet_angular_envelope(
 
     angular_basis_count = int(angular_coeff.shape[1])
     angular_degree = int(round(math.sqrt(angular_basis_count))) - 1
-    angular_basis = _real_spherical_harmonic_basis(theta, phi, angular_degree)
+    angular_basis = _real_spherical_harmonic_basis_from_cartesian(ae, angular_degree)
     angular_modulation = jnp.einsum("nab,abo->nao", angular_basis, angular_coeff)
 
     anisotropic_decay = jnp.exp(-anisotropic_radius)

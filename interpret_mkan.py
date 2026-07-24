@@ -1618,14 +1618,47 @@ def _jastrow_payload(
     jastrow_en_params = params.get("jastrow_en", None)
     if en_enabled and jastrow_en_params is not None:
         coeff = np.asarray(jastrow_en_params["en_coeff"])
+        en_mode = str(jastrow_cfg.get("en_mode", "auto")).lower()
+        if en_mode in ("fixed_cusp", "cusp", "kato"):
+            uses_fixed_cusp = True
+        elif en_mode in ("legacy", "polynomial", "poly"):
+            uses_fixed_cusp = False
+        elif en_mode == "auto":
+            uses_fixed_cusp = "en_alpha" in jastrow_en_params
+        else:
+            raise ValueError(
+                "jastrow.en_mode must be 'fixed_cusp', 'legacy', or 'auto'. "
+                f"Got {en_mode!r}."
+            )
+        alpha = np.asarray(
+            jastrow_en_params.get("en_alpha", np.ones((coeff.shape[0],)))
+        )
+        atoms = cfg.get("system", {}).get("molecule", [])
+        charges = np.asarray(
+            [
+                float(atom.get("charge", atom.get("atomic_number", 0.0)))
+                if isinstance(atom, dict)
+                else float(getattr(atom, "charge", getattr(atom, "atomic_number", 0.0)))
+                for atom in atoms
+            ],
+            dtype=float,
+        )
+        if charges.shape[0] != coeff.shape[0]:
+            charges = np.ones((coeff.shape[0],), dtype=float)
         for electron_idx in range(sum(electrons)):
             for atom_idx in range(coeff.shape[0]):
                 r = f"r_{electron_idx}A{atom_idx}"
+                if uses_fixed_cusp:
+                    en_terms.append(
+                        f"-({_format_float(charges[atom_idx])})*{r}/"
+                        f"(1+({_format_float(abs(float(alpha[atom_idx])) + 1.0e-4)})*{r})"
+                    )
                 for order in range(coeff.shape[1]):
                     value = float(coeff[atom_idx, order])
                     if abs(value) > 0.0:
+                        power = order + 2 if uses_fixed_cusp else order + 1
                         en_terms.append(
-                            f"({_format_float(value)})*({r}/(1+{r}))^{order + 1}"
+                            f"({_format_float(value)})*({r}/(1+{r}))^{power}"
                         )
 
     en_formula = "J_en = 0" if not en_terms else f"J_en = {_sum_terms(en_terms)}"

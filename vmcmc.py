@@ -1,4 +1,8 @@
-"""This module tells us how to move the walkers i.e. the calculation of T and A . We dont use the algorithm in Ferminet."""
+"""MCMC updates for walkers.
+
+The default method is the existing MALA/Langevin update.  A symmetric Gaussian
+random-walk update is also available for FermiNet-style sampling.
+"""
 
 import chex
 import jax
@@ -153,16 +157,93 @@ def _vmcmc_impl(
     return new_data, key, pmove
 
 
+def _random_walk_impl(
+    f,
+    ndim: int,
+    nelectrons: int,
+    steps: int,
+    data: networks.KANetsData,
+    params: networks.ParamTree,
+    key: chex.PRNGKey,
+    width,
+):
+    logabs_f = utils.select_output(f, 1)
+
+    pos = data.positions
+    expected_last_dim = nelectrons * ndim
+    squeeze_output = pos.ndim == 1
+    if pos.ndim not in (1, 2):
+        raise ValueError(
+            f'positions must have rank 1 or 2 (got shape {pos.shape}). '
+            'Expected (ncoord,) or (batch, ncoord).'
+        )
+    x0 = pos[None, ...] if squeeze_output else pos
+    if x0.shape[-1] != expected_last_dim:
+        raise ValueError(
+            f'positions last dim mismatch: got {x0.shape[-1]}, '
+            f'expected nelectrons*ndim={expected_last_dim}.'
+        )
+    batch_size = x0.shape[0]
+    sigma = jnp.maximum(jnp.asarray(width), jnp.asarray(1e-12))
+
+    def _logprob(x):
+        logabs = logabs_f(params, x, data.spins, data.atoms, data.charges)
+        logabs = jnp.asarray(logabs)
+        if logabs.ndim == 0:
+            logabs = logabs[None]
+        logabs = jnp.reshape(logabs, (batch_size,))
+        return 2.0 * logabs
+
+    def one_step(_, carry):
+        x1, key, lp_1, num_accepts = carry
+        key, noise_key = jax.random.split(key)
+        x2 = x1 + sigma * jax.random.normal(noise_key, shape=x1.shape)
+        lp_2 = _logprob(x2)
+        ratio = lp_2 - lp_1
+
+        key, accept_key = jax.random.split(key)
+        rnd = jnp.log(jax.random.uniform(accept_key, shape=ratio.shape))
+        accept = ratio > rnd
+        x_new = jnp.where(accept[..., None], x2, x1)
+        lp_new = jnp.where(accept, lp_2, lp_1)
+        num_accepts += accept.astype(jnp.int32)
+        return x_new, key, lp_new, num_accepts
+
+    lp_0 = _logprob(x0)
+    init = (x0, key, lp_0, jnp.zeros(batch_size, dtype=jnp.int32))
+    x_new, key, _, num_accepts = lax.fori_loop(0, steps, one_step, init)
+    pmove = jnp.mean(num_accepts / steps)
+    pmove = constants.pmean(pmove)
+    x_new = x_new[0] if squeeze_output else x_new
+    new_data = networks.KANetsData(
+        positions=x_new,
+        spins=data.spins,
+        atoms=data.atoms,
+        charges=data.charges,
+    )
+    return new_data, key, pmove
+
+
 def make_vmcmc_step(
     f,
     ndim: int,
     nelectrons: int,
     steps: int = 1,
     jit: bool = True,
+    method: str = 'mala',
 ):
     """Builds a training-loop compatible VMCMC step: (params, data, key, width)->(new_data, pmove)."""
     if steps <= 0:
         raise ValueError('steps must be positive.')
+    method = method.lower()
+    if method == 'langevin':
+        method = 'mala'
+    elif method in ('rwm', 'gaussian', 'gaussian_random_walk'):
+        method = 'random_walk'
+    if method not in ('mala', 'random_walk'):
+        raise ValueError(
+            f"Unsupported mcmc method {method!r}. Expected 'mala' or 'random_walk'."
+        )
 
     def vmcmc_step(
         params: networks.ParamTree,
@@ -171,16 +252,28 @@ def make_vmcmc_step(
         width,
     ):
         width = jnp.maximum(jnp.asarray(width), jnp.asarray(1e-12))
-        new_data, _, pmove = _vmcmc_impl(
-            f=f,
-            ndim=ndim,
-            nelectrons=nelectrons,
-            steps=steps,
-            data=data,
-            params=params,
-            key=key,
-            tstep=width,
-        )
+        if method == 'mala':
+            new_data, _, pmove = _vmcmc_impl(
+                f=f,
+                ndim=ndim,
+                nelectrons=nelectrons,
+                steps=steps,
+                data=data,
+                params=params,
+                key=key,
+                tstep=width,
+            )
+        else:
+            new_data, _, pmove = _random_walk_impl(
+                f=f,
+                ndim=ndim,
+                nelectrons=nelectrons,
+                steps=steps,
+                data=data,
+                params=params,
+                key=key,
+                width=width,
+            )
         return new_data, pmove
 
     if jit:

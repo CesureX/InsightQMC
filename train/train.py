@@ -1,4 +1,6 @@
 import pickle
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -126,6 +128,7 @@ class VMCTrainer:
             batch_size=self.batch_size,
             pretrain_mcmc_steps=self.pretrain_mcmc_steps,
             pretrain_mcmc_width=self.pretrain_mcmc_width,
+            pretrain_mcmc_method=self.pretrain_mcmc_method,
             step_jit=self.pretrain_step_jit,
             full_det=self.full_det,
             debug=self.debug,
@@ -171,8 +174,12 @@ class VMCTrainer:
         self.dft_grid_level = cfg.get('dft_grid_level', 3)
         self.pyscf_mol = cfg.system.get('pyscf_mol')
 
+        self.mcmc_method = str(cfg.get('mcmc_method', 'mala')).lower()
         self.mcmc_steps = int(cfg.mcmc_steps)
         self.mcmc_width = float(cfg.mcmc_width)
+        self.pretrain_mcmc_method = str(
+            cfg.get('pretrain_mcmc_method', self.mcmc_method)
+        ).lower()
         self.pretrain_mcmc_steps = int(cfg.get('pretrain_mcmc_steps', 1))
         self.pretrain_mcmc_width = float(cfg.get('pretrain_mcmc_width', 0.02))
         self.pretrain_step_jit = bool(cfg.get('pretrain_step_jit', True))
@@ -297,6 +304,8 @@ class VMCTrainer:
         self.jastrow_ee = bool(jastrow_cfg.get('ee', True))
         self.jastrow_en = bool(jastrow_cfg.get('en', False))
         self.jastrow_en_order = int(jastrow_cfg.get('en_radial_order', 4))
+        self.jastrow_en_mode = str(jastrow_cfg.get('en_mode', 'fixed_cusp')).lower()
+        jastrow.en_jastrow_uses_fixed_cusp(self.jastrow_en_mode)
         self.jastrow_type = str(jastrow_cfg.get('type', 'pade')).lower()
         self.jastrow_radial_order = int(jastrow_cfg.get('radial_order', 4))
 
@@ -423,8 +432,63 @@ class VMCTrainer:
             'train_opt_state': train_opt_state,
             'train_optimizer': self.optimizer_name,
             'mkan_static_state': self._mkan_static_state,
+            'mkan_grid_state': self._extract_mkan_grid_state(params),
             'orbital_head_static_state': self._orbital_head_static_state,
         }
+
+    def _extract_mkan_grid_state(self, params):
+        if self.mkan_layer_type not in ('base', 'spline'):
+            return None
+        if not (isinstance(params, dict) and 'mkan' in params):
+            return None
+        if self._mkan_graphdef is None or self._mkan_static_state is None:
+            return None
+
+        model = nnx.merge(self._mkan_graphdef, params['mkan'], self._mkan_static_state)
+        layer_states = []
+        for layer in model.layers:
+            grid = getattr(layer, 'grid', None)
+            if grid is None:
+                layer_states.append(None)
+                continue
+            layer_states.append(
+                {
+                    'G': int(grid.G),
+                    'grid_range': tuple(float(v) for v in grid.grid_range),
+                    'grid_e': float(grid.grid_e),
+                    'item': jnp.asarray(grid.item),
+                }
+            )
+        return {'layers': layer_states}
+
+    def _restore_mkan_grid_state(self, params, grid_state) -> None:
+        if not grid_state or self.mkan_layer_type not in ('base', 'spline'):
+            return
+        if not (isinstance(params, dict) and 'mkan' in params):
+            return
+
+        model = nnx.merge(self._mkan_graphdef, params['mkan'], self._mkan_static_state)
+        for layer, layer_state in zip(model.layers, grid_state.get('layers', ())):
+            if layer_state is None:
+                continue
+            grid = getattr(layer, 'grid', None)
+            if grid is None:
+                continue
+            grid.G = int(layer_state['G'])
+            grid.grid_range = tuple(float(v) for v in layer_state['grid_range'])
+            grid.grid_e = float(layer_state['grid_e'])
+            grid.item = jnp.asarray(layer_state['item'])
+        self._mkan_graphdef, _, self._mkan_static_state = nnx.split(
+            model, nnx.Param, ...
+        )
+
+    def _resume_requires_mkan_grid_state(self, resume_state) -> bool:
+        if not self.grid_extension_enabled or self.mkan_layer_type not in ('base', 'spline'):
+            return False
+        if resume_state.get('stage') != 'train':
+            return False
+        step = int(resume_state.get('step', 0))
+        return any(step >= extension_step for extension_step in self.grid_extension_steps)
 
     def _build_networks(self):
         model_template = self._make_mkan_template()
@@ -534,7 +598,11 @@ class VMCTrainer:
         jastrow_uses_r_ae = self.jastrow_type == 'ferminet_three_body'
         jastrow_params = init_jastrow() if self.jastrow_ee else None
         jastrow_en_params = (
-            jastrow.init_one_body_en_jastrow(self.natoms, self.jastrow_en_order)
+            jastrow.init_one_body_en_jastrow(
+                self.natoms,
+                self.jastrow_en_order,
+                mode=self.jastrow_en_mode,
+            )
             if self.jastrow_en
             else None
         )
@@ -673,15 +741,6 @@ class VMCTrainer:
                 ae_channels = [
                     channel for channel, spin in zip(ae_channels, self.electrons) if spin > 0
                 ]
-                theta, phi = envelope.angular_coordinates(ae)
-                theta_channels = jnp.split(theta, spin_partitions, axis=0)
-                theta_channels = [
-                    channel for channel, spin in zip(theta_channels, self.electrons) if spin > 0
-                ]
-                phi_channels = jnp.split(phi, spin_partitions, axis=0)
-                phi_channels = [
-                    channel for channel, spin in zip(phi_channels, self.electrons) if spin > 0
-                ]
                 if self.envelope_type == 'isotropic':
                     apply_envelope = envelope.apply_isotropic_envelope
                 elif self.envelope_type == 'chebyshev':
@@ -712,15 +771,13 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             r_ae=r_ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
+                            ae=ae_channel,
                             **envelope_param,
                         )
-                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, r_ae_channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
-                            theta_channels,
-                            phi_channels,
+                            ae_channels,
                             params['envelope'],
                         )
                     ]
@@ -729,15 +786,13 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             r_ae=r_ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
+                            ae=ae_channel,
                             **envelope_param,
                         )
-                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, r_ae_channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
-                            theta_channels,
-                            phi_channels,
+                            ae_channels,
                             params['envelope'],
                         )
                     ]
@@ -746,15 +801,13 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             r_ae=r_ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
+                            ae=ae_channel,
                             **envelope_param,
                         )
-                        for channel, r_ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, r_ae_channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             r_ae_channels,
-                            theta_channels,
-                            phi_channels,
+                            ae_channels,
                             params['envelope'],
                         )
                     ]
@@ -763,15 +816,11 @@ class VMCTrainer:
                         channel
                         * apply_envelope(
                             ae=ae_channel,
-                            theta=theta_channel,
-                            phi=phi_channel,
                             **envelope_param,
                         )
-                        for channel, ae_channel, theta_channel, phi_channel, envelope_param in zip(
+                        for channel, ae_channel, envelope_param in zip(
                             orbital_channels,
                             ae_channels,
-                            theta_channels,
-                            phi_channels,
                             params['envelope'],
                         )
                     ]
@@ -829,7 +878,9 @@ class VMCTrainer:
                         raise ValueError('Missing Jastrow parameters for electron-nucleus Jastrow.')
                     logmag = logmag + jastrow.apply_one_body_en_jastrow(
                         r_ae,
+                        charges,
                         params['jastrow_en'],
+                        mode=self.jastrow_en_mode,
                     )
             return phase, logmag
 
@@ -1049,6 +1100,16 @@ class VMCTrainer:
                     self._mkan_static_state,
                     resume_state['mkan_static_state'],
                 )
+            if resume_state.get('mkan_grid_state') is not None:
+                self._restore_mkan_grid_state(params, resume_state['mkan_grid_state'])
+            elif self._resume_requires_mkan_grid_state(resume_state):
+                raise ValueError(
+                    'Cannot safely resume this checkpoint: it was saved after '
+                    'grid_extension changed the MKAN spline grid, but the checkpoint '
+                    'does not contain mkan_grid_state. Resume from a checkpoint before '
+                    'the first grid_extension step, or use a newer checkpoint created '
+                    'after this fix.'
+                )
             if resume_state.get('orbital_head_static_state') is not None:
                 self._orbital_head_static_state = _merge_static_state_with_template(
                     self._orbital_head_static_state,
@@ -1131,12 +1192,35 @@ class VMCTrainer:
                     changed = True
 
         if self.jastrow_en:
-            target = jastrow.init_one_body_en_jastrow(self.natoms, self.jastrow_en_order)
+            existing_en_params = new_params.get('jastrow_en', None)
+            resume_uses_fixed_cusp = jastrow.en_jastrow_uses_fixed_cusp(
+                self.jastrow_en_mode,
+                params=existing_en_params,
+            )
+            target = jastrow.init_one_body_en_jastrow(
+                self.natoms,
+                self.jastrow_en_order,
+                mode='fixed_cusp' if resume_uses_fixed_cusp else 'legacy',
+            )
             if 'jastrow_en' not in new_params:
                 new_params['jastrow_en'] = target
                 changed = True
             else:
                 en_params = dict(new_params['jastrow_en'])
+                if resume_uses_fixed_cusp:
+                    if 'en_alpha' not in en_params:
+                        en_params['en_alpha'] = target['en_alpha']
+                        changed = True
+                    else:
+                        resized, did_resize = self._resize_1d_param(
+                            en_params['en_alpha'],
+                            target['en_alpha'].shape[0],
+                        )
+                        en_params['en_alpha'] = resized
+                        changed = changed or did_resize
+                elif 'en_alpha' in en_params:
+                    en_params.pop('en_alpha')
+                    changed = True
                 if 'en_coeff' not in en_params:
                     en_params['en_coeff'] = target['en_coeff']
                     changed = True
@@ -1580,6 +1664,7 @@ class VMCTrainer:
             nelectrons=self.nelectrons,
             steps=self.mcmc_steps,
             jit=not self.use_pmap,
+            method=self.mcmc_method,
         )
         if self.optimizer_name in ('adam', 'adamw'):
             optimizer = self._build_optimizer()
@@ -1807,20 +1892,42 @@ class VMCTrainer:
                 iterator.write(f'Extended MKAN grid to G={g_new} at train step {step_id}.')
                 self.run_manager.log_scalars('train', step_id, {'grid_G': float(g_new)})
 
-            checkpoint_state = self._build_checkpoint_state(
-                stage='train',
-                step=step_id,
-                params=self._host_params(state.params),
-                data=self._host_data(data),
-                key=key,
-                train_opt_state=self._host_opt_state(state.opt_state),
-            )
             if self.run_manager.should_checkpoint(step_id, self.iterations):
+                checkpoint_state = self._build_checkpoint_state(
+                    stage='train',
+                    step=step_id,
+                    params=self._host_params(state.params),
+                    data=self._host_data(data),
+                    key=key,
+                    train_opt_state=self._host_opt_state(state.opt_state),
+                )
                 self.run_manager.checkpoints.save_step('train', step_id, checkpoint_state)
 
             runtime = runtime.replace(data=data, key=key)
 
+    def _run_output_analysis(self) -> None:
+        if not bool(self.cfg.output.get('auto_analyze', True)):
+            return
+
+        repo_root = Path(__file__).resolve().parents[1]
+        analyzer = repo_root / 'output_analysis' / 'analyze_run.py'
+        if not analyzer.exists():
+            print(f'Warning: output analysis script not found: {analyzer}')
+            return
+
+        run_dir = self.run_manager.run_dir.resolve()
+        print(f'Running output analysis for {run_dir} ...')
+        try:
+            subprocess.run(
+                [sys.executable, str(analyzer), '--run', str(run_dir)],
+                cwd=str(repo_root),
+                check=True,
+            )
+        except Exception as exc:
+            print(f'Warning: output analysis failed for {run_dir}: {exc}')
+
     def run(self) -> None:
+        completed_training = False
         try:
             (
                 kan_init,
@@ -1874,8 +1981,11 @@ class VMCTrainer:
                 log_network=log_network,
                 extend_mkan_grid=extend_mkan_grid,
             )
+            completed_training = True
         finally:
             self.run_manager.close()
+            if completed_training:
+                self._run_output_analysis()
 
 
 def train(cfg: ml_collections.ConfigDict):

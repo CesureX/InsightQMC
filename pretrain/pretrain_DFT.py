@@ -140,6 +140,7 @@ def pretrain_ks_dft(
     full_det: bool = True,
     mcmc_steps: int = 1,
     mcmc_width: float = 0.02,
+    mcmc_method: str = 'mala',
     start_iteration: int = 0,
     opt_state: Optional[optax.OptState] = None,
     data: Optional[networks.KANetsData] = None,
@@ -164,6 +165,7 @@ def pretrain_ks_dft(
       states=0,
       mcmc_steps=mcmc_steps,
       mcmc_width=mcmc_width,
+      mcmc_method=mcmc_method,
       mcmc_jit=not use_pmap,
   )
   if use_pmap:
