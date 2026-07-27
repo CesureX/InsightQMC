@@ -31,6 +31,7 @@ class PretrainRunner:
         pretrain_mcmc_steps: int,
         pretrain_mcmc_width: float,
         pretrain_mcmc_method: str,
+        step_jit: bool,
         full_det: bool,
         debug: bool,
         scalar_pretrain: bool = False,
@@ -63,6 +64,7 @@ class PretrainRunner:
         self.pretrain_mcmc_steps = pretrain_mcmc_steps
         self.pretrain_mcmc_width = pretrain_mcmc_width
         self.pretrain_mcmc_method = pretrain_mcmc_method
+        self.step_jit = step_jit
         self.full_det = full_det
         self.debug = debug
         self.scalar_pretrain = scalar_pretrain
@@ -185,6 +187,7 @@ class PretrainRunner:
                     use_pmap=self.use_pmap,
                     devices=self.devices,
                     num_devices=self.num_devices,
+                    step_jit=self.step_jit,
                 )
         elif self.method == 'dft':
             if self.hf_states != 0:
@@ -260,6 +263,7 @@ class PretrainRunner:
                     use_pmap=self.use_pmap,
                     devices=self.devices,
                     num_devices=self.num_devices,
+                    step_jit=self.step_jit,
                 )
         else:
             raise ValueError(f"Unsupported pretrain_method: {self.method}. Expected 'hf' or 'dft'.")

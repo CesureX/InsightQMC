@@ -4,6 +4,9 @@ from .Legendre import LegendreLayer
 from .Fourier import FourierLayer
 from .RBF import RBFLayer
 from .Sine import SineLayer
+from .FastKAN import FastKANLayer
+from .ReLUKAN import ReLUKANLayer
+from .WavKAN import WavKANLayer
 
 
 def get_layer(layer_type: str):
@@ -28,7 +31,10 @@ def get_layer(layer_type: str):
         "legendre": LegendreLayer,
         "fourier": FourierLayer,
         "rbf": RBFLayer,
-        "sine": SineLayer
+        "sine": SineLayer,
+        "fastkan": FastKANLayer,
+        "relukan": ReLUKANLayer,
+        "wavkan": WavKANLayer,
     }
     
     if layer_type not in layer_map:

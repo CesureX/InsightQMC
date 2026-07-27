@@ -17,6 +17,9 @@ import networks
 from jkan.models import MultKAN
 from tools.utils import system
 
+'''
+python interpret_mkan.py  --run-dir /vepfs-mlp2/c20250516/250504030/jing/InsightQMC/outputs/C_LZW6022246
+'''
 
 def _load_config(config_path: Path) -> ml_collections.ConfigDict:
     raw_cfg = json.loads(config_path.read_text())
@@ -152,6 +155,23 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
                 "D": _first_int(cfg.k, 5),
                 "grid_range": _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
                 "external_weights": bool(cfg.external_weights),
+                "add_bias": bool(cfg.add_bias),
+            }
+        elif layer_type == "fastkan":
+            required_parameters = {
+                "D": _first_int(cfg.g, 8),
+                "grid_range": _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
+                "add_bias": bool(cfg.add_bias),
+            }
+        elif layer_type == "relukan":
+            required_parameters = {
+                "G": _first_int(cfg.g, 5),
+                "k": _first_int(cfg.k, 3),
+                "add_bias": bool(cfg.add_bias),
+            }
+        elif layer_type == "wavkan":
+            required_parameters = {
+                "wavelet_type": "mexican_hat",
                 "add_bias": bool(cfg.add_bias),
             }
         elif layer_type == "sine":

@@ -6,12 +6,12 @@ def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
         'batch_size': 32768,
-        'layer_dims': [12, 48, 48, 48, 64],
+        'layer_dims': [8, 48, 48, 48, 64],
         'g': [10],
         'k': [10],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-3, 3],
-        'iterations': 200000,
+        'iterations': 150000,
         'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
@@ -26,7 +26,7 @@ def default() -> ml_collections.ConfigDict:
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 12,
+        'nfeatures': 8,
         'orbital_features': 'ee_aggregate',
         'mcmc_method': 'random_walk', # mala: guided/Langevin; random_walk: FermiNet-style Gaussian proposal
         'pretrain_mcmc_method': 'random_walk',
@@ -34,6 +34,7 @@ def default() -> ml_collections.ConfigDict:
         'mcmc_width': 0.02,
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
+        'pretrain_step_jit': True,
         'clip_local_energy': 5.0,
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
@@ -43,18 +44,49 @@ def default() -> ml_collections.ConfigDict:
         'laplacian_method': 'folx', # default or folx
         't_init': 0,
         'debug': False,
+        # Optimizer used for the VMC energy minimization. Pretraining always
+        # uses Adam. Supported values: 'adam', 'adamw', 'rgn', 'kfac'.
+        'optimizer': 'kfac',
         'learning_rate': 0.00004,
         'learning_rate_decay': 50000.0,
         'gradient_clip_norm': 1.0,
+        'adamw': {
+            # Decoupled weight decay applied to all trainable parameters.
+            'weight_decay': 1.0e-4,
+        },
+        'rgn': {
+            # Compile MCMC and the RGN/CG solve as two separate executables.
+            'split_compilation': True,
+            # P = H_RGN + (S + eta I) / epsilon.
+            'epsilon': 0.01,
+            'eta': 1.0e-3,
+            'cg_maxiter': 20,
+            'cg_tol': 1.0e-4,
+            # Optional conservative scaling of the solved RGN direction.
+            'step_scale': 1.0,
+            'max_update_norm': 0.1,
+        },
+        'kfac': {
+            'damping': 1.0e-3,
+            'min_damping': 1.0e-4,
+            'norm_constraint': 1.0e-3,
+            'cov_ema_decay': 0.95,
+            'invert_every': 1,
+            'l2_reg': 0.0,
+            # InsightQMC's KAN layers do not provide custom KFAC tags.
+            'register_only_generic': True,
+        },
         'multi_device': True,
         # 0 means use all local JAX devices. batch_size is the global batch and
         # must be divisible by the number of devices used.
         'num_devices': 0,
+        # 0 follows num_devices; set to 1 to keep HF/DFT pretraining on one device.
+        'pretrain_num_devices': 0,
         'reset_optimizer_on_resume': False,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
         'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
-        'envelope_degree': 1,
+        'envelope_degree': 0,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
@@ -104,10 +136,9 @@ def default() -> ml_collections.ConfigDict:
         },
         'system': {
             'molecule': [
-                system.Atom('N', (0.0, 0.0, 0.0)),
-                system.Atom('N', (0.0, 0.0, 2.068)),
+                system.Atom('Li', (0.0, 0.0, 0.0)),
             ],
-            'electrons': (7, 7),
+            'electrons': (2, 1),
         },
         'jastrow': {
             'ee': True, 
@@ -118,7 +149,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': 'outputs/N2_0723_bond2068_with_M_70k_superparameters_chebyshev',
+            'root_dir': 'outputs/Li07272058_with_M_70k_superparameters_chebyshev',
             'checkpoint_every': 10000,
             'metrics_every': 5,
             'resume': False,

@@ -24,7 +24,13 @@ import networks
 from jkan.models import MultKAN
 import loss as qmc_loss_functions
 import vmcmc
-from opt import make_opt_update_step, make_training_step
+from opt import (
+    make_kfac_training_step,
+    make_opt_update_step,
+    make_rgn_update_step,
+    make_split_training_step,
+    make_training_step,
+)
 from train.pretrain_runner import PretrainRunner
 from train.training_io import RunManager
 
@@ -123,13 +129,14 @@ class VMCTrainer:
             pretrain_mcmc_steps=self.pretrain_mcmc_steps,
             pretrain_mcmc_width=self.pretrain_mcmc_width,
             pretrain_mcmc_method=self.pretrain_mcmc_method,
+            step_jit=self.pretrain_step_jit,
             full_det=self.full_det,
             debug=self.debug,
             scalar_pretrain=False,
             phase_weight=self.mkan_pretrain_phase_weight,
-            use_pmap=self.use_pmap,
-            devices=self.devices,
-            num_devices=self.num_devices,
+            use_pmap=self.pretrain_use_pmap,
+            devices=self.pretrain_devices,
+            num_devices=self.pretrain_num_devices,
         )
 
     def _read_config(self) -> None:
@@ -175,6 +182,7 @@ class VMCTrainer:
         ).lower()
         self.pretrain_mcmc_steps = int(cfg.get('pretrain_mcmc_steps', 1))
         self.pretrain_mcmc_width = float(cfg.get('pretrain_mcmc_width', 0.02))
+        self.pretrain_step_jit = bool(cfg.get('pretrain_step_jit', True))
 
         self.clip_local_energy = float(cfg.clip_local_energy)
         self.use_scan = bool(cfg.use_scan)
@@ -192,6 +200,35 @@ class VMCTrainer:
         self.learning_rate = float(cfg.learning_rate)
         self.learning_rate_decay = float(cfg.learning_rate_decay)
         self.gradient_clip_norm = float(cfg.get('gradient_clip_norm', 0.0))
+        self.optimizer_name = str(cfg.get('optimizer', 'adam')).lower()
+        if self.optimizer_name not in ('adam', 'adamw', 'rgn', 'kfac'):
+            raise ValueError(
+                f"Unsupported optimizer {self.optimizer_name!r}; "
+                "expected 'adam', 'adamw', 'rgn', or 'kfac'."
+            )
+        adamw_cfg = cfg.get('adamw', {})
+        self.adamw_weight_decay = float(
+            adamw_cfg.get('weight_decay', 1.0e-4))
+        if self.adamw_weight_decay < 0.0:
+            raise ValueError('adamw.weight_decay must be non-negative.')
+        rgn_cfg = cfg.get('rgn', {})
+        self.rgn_epsilon = float(rgn_cfg.get('epsilon', 0.01))
+        self.rgn_split_compilation = bool(
+            rgn_cfg.get('split_compilation', True))
+        self.rgn_eta = float(rgn_cfg.get('eta', 1.0e-3))
+        self.rgn_cg_maxiter = int(rgn_cfg.get('cg_maxiter', 20))
+        self.rgn_cg_tol = float(rgn_cfg.get('cg_tol', 1.0e-4))
+        self.rgn_step_scale = float(rgn_cfg.get('step_scale', 1.0))
+        self.rgn_max_update_norm = float(rgn_cfg.get('max_update_norm', 0.1))
+        kfac_cfg = cfg.get('kfac', {})
+        self.kfac_damping = float(kfac_cfg.get('damping', 1.0e-3))
+        self.kfac_min_damping = float(kfac_cfg.get('min_damping', 1.0e-4))
+        self.kfac_norm_constraint = float(kfac_cfg.get('norm_constraint', 1.0e-3))
+        self.kfac_cov_ema_decay = float(kfac_cfg.get('cov_ema_decay', 0.95))
+        self.kfac_invert_every = int(kfac_cfg.get('invert_every', 1))
+        self.kfac_l2_reg = float(kfac_cfg.get('l2_reg', 0.0))
+        self.kfac_register_only_generic = bool(
+            kfac_cfg.get('register_only_generic', True))
         self.multi_device = bool(cfg.get('multi_device', True))
         self.requested_num_devices = int(cfg.get('num_devices', 0))
         if self.requested_num_devices < 0:
@@ -210,14 +247,46 @@ class VMCTrainer:
                     f'but only {len(local_devices)} local JAX devices are available.'
                 )
             self.num_devices = self.requested_num_devices
+        if self.optimizer_name == 'kfac' and not self.multi_device:
+            raise ValueError(
+                "InsightQMC's KFAC path requires multi_device=True. It also "
+                'works with a single visible JAX device through pmap.')
+        if (
+            self.optimizer_name == 'kfac'
+            and self.requested_num_devices not in (0, len(local_devices))
+        ):
+            raise ValueError(
+                'KFAC currently requires all visible local JAX devices; set '
+                'num_devices=0 or restrict CUDA_VISIBLE_DEVICES before launch.')
         self.devices = local_devices[: self.num_devices]
-        self.use_pmap = self.multi_device and self.num_devices > 1
+        self.use_pmap = self.multi_device and (
+            self.num_devices > 1 or self.optimizer_name == 'kfac')
         if self.use_pmap and self.batch_size % self.num_devices != 0:
             raise ValueError(
                 f'batch_size={self.batch_size} must be divisible by '
                 f'num_devices={self.num_devices} when multi_device is enabled.'
             )
         self.device_batch_size = self.batch_size // (self.num_devices if self.use_pmap else 1)
+
+        self.requested_pretrain_num_devices = int(cfg.get('pretrain_num_devices', 0))
+        if self.requested_pretrain_num_devices < 0:
+            raise ValueError('pretrain_num_devices must be non-negative.')
+        if self.requested_pretrain_num_devices == 0:
+            self.pretrain_num_devices = self.num_devices
+        else:
+            if self.requested_pretrain_num_devices > len(local_devices):
+                raise ValueError(
+                    f'pretrain_num_devices={self.requested_pretrain_num_devices} was requested, '
+                    f'but only {len(local_devices)} local JAX devices are available.'
+                )
+            self.pretrain_num_devices = self.requested_pretrain_num_devices
+        self.pretrain_devices = local_devices[: self.pretrain_num_devices]
+        self.pretrain_use_pmap = self.pretrain_num_devices > 1
+        if self.pretrain_use_pmap and self.batch_size % self.pretrain_num_devices != 0:
+            raise ValueError(
+                f'batch_size={self.batch_size} must be divisible by '
+                f'pretrain_num_devices={self.pretrain_num_devices} when pretraining uses pmap.'
+            )
         self.reset_optimizer_on_resume = bool(cfg.get('reset_optimizer_on_resume', False))
         self.resize_resumed_noise = float(cfg.get('resize_resumed_noise', 0.0))
         self.preiterations = int(cfg.preiterations)
@@ -258,13 +327,14 @@ class VMCTrainer:
         ).lower()
         if self.orbital_head_input_mode not in (
             'shared_rows',
+            'per_electron',
             'all_electrons',
             'global',
             'flatten',
         ):
             raise ValueError(
-                "orbital_head.input_mode must be 'shared_rows', 'all_electrons', "
-                "'global', or 'flatten'."
+                "orbital_head.input_mode must be 'shared_rows', 'per_electron', "
+                "'all_electrons', 'global', or 'flatten'."
             )
         self.orbital_head_hidden_dims = tuple(
             int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
@@ -360,6 +430,7 @@ class VMCTrainer:
             'key': key,
             'pretrain_opt_state': pretrain_opt_state,
             'train_opt_state': train_opt_state,
+            'train_optimizer': self.optimizer_name,
             'mkan_static_state': self._mkan_static_state,
             'mkan_grid_state': self._extract_mkan_grid_state(params),
             'orbital_head_static_state': self._orbital_head_static_state,
@@ -885,45 +956,6 @@ class VMCTrainer:
             seed=self.seed,
         )
 
-    def _mkan_required_parameters(self):
-        if self.mkan_required_parameters is not None:
-            return dict(self.mkan_required_parameters)
-
-        if self.mkan_layer_type in ('chebyshev', 'legendre'):
-            return {
-                'D': _first_int(self.k, 3),
-                'flavor': 'exact' if self.mkan_layer_type == 'chebyshev' else None,
-                'external_weights': self.external_weights,
-                'add_bias': self.add_bias,
-            }
-        if self.mkan_layer_type in ('base', 'spline'):
-            return {
-                'k': _first_int(self.k, 3),
-                'G': _first_int(self.g, 5),
-                'grid_range': _first_grid_range(self.grid_range),
-                'external_weights': self.external_weights,
-                'add_bias': self.add_bias,
-            }
-        if self.mkan_layer_type == 'rbf':
-            return {
-                'D': _first_int(self.k, 5),
-                'grid_range': _first_grid_range(self.grid_range, default=(-2.0, 2.0)),
-                'external_weights': self.external_weights,
-                'add_bias': self.add_bias,
-            }
-        if self.mkan_layer_type == 'sine':
-            return {
-                'D': _first_int(self.k, 5),
-                'external_weights': self.external_weights,
-                'add_bias': self.add_bias,
-            }
-        if self.mkan_layer_type == 'fourier':
-            return {
-                'D': _first_int(self.k, 5),
-                'add_bias': self.add_bias,
-            }
-        raise ValueError(f'Unsupported MKAN layer_type: {self.mkan_layer_type}')
-
     def _make_orbital_head_template(self):
         if self.orbital_head_type in ('dense', 'mlp'):
             return networks.DenseOrbitalHead(
@@ -960,45 +992,83 @@ class VMCTrainer:
             "Expected 'mlp', 'dense', 'kan', or 'mkan'."
         )
 
-    def _orbital_head_required_parameters(self):
-        if self.orbital_head_required_parameters is not None:
-            return dict(self.orbital_head_required_parameters)
+    def _kan_required_parameters_for_layer(
+        self,
+        layer_type: str,
+        required_parameters,
+        *,
+        add_bias: Optional[bool] = None,
+        external_weights: Optional[bool] = None,
+    ):
+        if required_parameters is not None:
+            return dict(required_parameters)
 
-        layer_type = self.orbital_head_layer_type
+        use_bias = self.add_bias if add_bias is None else bool(add_bias)
+        use_external_weights = (
+            self.external_weights if external_weights is None else bool(external_weights)
+        )
+
         if layer_type in ('chebyshev', 'legendre'):
             return {
                 'D': _first_int(self.k, 3),
                 'flavor': 'exact' if layer_type == 'chebyshev' else None,
-                'external_weights': self.external_weights,
-                'add_bias': self.orbital_head_bias,
+                'external_weights': use_external_weights,
+                'add_bias': use_bias,
             }
         if layer_type in ('base', 'spline'):
             return {
                 'k': _first_int(self.k, 3),
                 'G': _first_int(self.g, 5),
                 'grid_range': _first_grid_range(self.grid_range),
-                'external_weights': self.external_weights,
-                'add_bias': self.orbital_head_bias,
+                'external_weights': use_external_weights,
+                'add_bias': use_bias,
             }
         if layer_type == 'rbf':
             return {
                 'D': _first_int(self.k, 5),
                 'grid_range': _first_grid_range(self.grid_range, default=(-2.0, 2.0)),
-                'external_weights': self.external_weights,
-                'add_bias': self.orbital_head_bias,
+                'external_weights': use_external_weights,
+                'add_bias': use_bias,
             }
+        if layer_type == 'fastkan':
+            return {
+                'D': _first_int(self.g, 8),
+                'grid_range': _first_grid_range(self.grid_range, default=(-2.0, 2.0)),
+                'add_bias': use_bias,
+            }
+        if layer_type == 'relukan':
+            return {
+                'G': _first_int(self.g, 5),
+                'k': _first_int(self.k, 3),
+                'add_bias': use_bias,
+            }
+        if layer_type == 'wavkan':
+            return {'wavelet_type': 'mexican_hat', 'add_bias': use_bias}
         if layer_type == 'sine':
             return {
                 'D': _first_int(self.k, 5),
-                'external_weights': self.external_weights,
-                'add_bias': self.orbital_head_bias,
+                'external_weights': use_external_weights,
+                'add_bias': use_bias,
             }
         if layer_type == 'fourier':
             return {
                 'D': _first_int(self.k, 5),
-                'add_bias': self.orbital_head_bias,
+                'add_bias': use_bias,
             }
-        raise ValueError(f'Unsupported orbital_head.layer_type: {layer_type}')
+        raise ValueError(f'Unsupported KAN layer_type: {layer_type}')
+
+    def _orbital_head_required_parameters(self):
+        return self._kan_required_parameters_for_layer(
+            self.orbital_head_layer_type,
+            self.orbital_head_required_parameters,
+            add_bias=self.orbital_head_bias,
+        )
+
+    def _mkan_required_parameters(self):
+        return self._kan_required_parameters_for_layer(
+            self.mkan_layer_type,
+            self.mkan_required_parameters,
+        )
 
     def _initialize_params_and_data(self, kan_init):
         resume_state = self.run_manager.load_last_checkpoint()
@@ -1054,7 +1124,13 @@ class VMCTrainer:
             elif stage == 'train':
                 train_start_step = int(resume_state.get('step', self.t_init))
                 train_opt_state = resume_state.get('train_opt_state')
-                if self.reset_optimizer_on_resume or params_changed_on_resume:
+                checkpoint_optimizer = str(
+                    resume_state.get('train_optimizer', 'adam')).lower()
+                if (
+                    self.reset_optimizer_on_resume
+                    or params_changed_on_resume
+                    or checkpoint_optimizer != self.optimizer_name
+                ):
                     train_opt_state = None
 
         if data is None:
@@ -1550,13 +1626,14 @@ class VMCTrainer:
         transforms = []
         if self.gradient_clip_norm > 0.0:
             transforms.append(optax.clip_by_global_norm(self.gradient_clip_norm))
-        transforms.extend(
-            (
-                optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-6),
-                optax.scale_by_schedule(learning_rate_schedule),
-                optax.scale(-1.0),
-            )
-        )
+        transforms.append(optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-6))
+        if self.optimizer_name == 'adamw':
+            transforms.append(
+                optax.add_decayed_weights(self.adamw_weight_decay))
+        transforms.extend((
+            optax.scale_by_schedule(learning_rate_schedule),
+            optax.scale(-1.0),
+        ))
         return optax.chain(*transforms)
 
     def _build_train_step(self, signed_network: Callable, logabs_network: Callable, log_network: Callable):
@@ -1578,7 +1655,6 @@ class VMCTrainer:
             complex_output=self.complex_output,
         )
 
-        optimizer = self._build_optimizer()
         batch_signed_network = jax.vmap(
             signed_network, in_axes=(None, 0, None, None, None), out_axes=(0, 0)
         )
@@ -1590,13 +1666,110 @@ class VMCTrainer:
             jit=not self.use_pmap,
             method=self.mcmc_method,
         )
-        step_fn = make_training_step(
-            mcmc_step=monte_carlo,
-            optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
-            reset_if_nan=True,
-            jit=not self.use_pmap,
-        )
-        if self.use_pmap:
+        if self.optimizer_name in ('adam', 'adamw'):
+            optimizer = self._build_optimizer()
+            optimizer_step = make_opt_update_step(evaluate_loss, optimizer)
+            step_fn = make_training_step(
+                mcmc_step=monte_carlo,
+                optimizer_step=optimizer_step,
+                reset_if_nan=True,
+                jit=not self.use_pmap,
+            )
+        elif self.optimizer_name == 'rgn':
+            optimizer = optax.identity()
+            optimizer_step = make_rgn_update_step(
+                evaluate_loss,
+                loss_network,
+                local_energy,
+                epsilon=self.rgn_epsilon,
+                eta=self.rgn_eta,
+                cg_maxiter=self.rgn_cg_maxiter,
+                cg_tol=self.rgn_cg_tol,
+                step_scale=self.rgn_step_scale,
+                max_update_norm=self.rgn_max_update_norm,
+                reset_if_nan=self.rgn_split_compilation,
+            )
+            if self.rgn_split_compilation:
+                if self.use_pmap:
+                    compiled_monte_carlo = constants.pmap(
+                        monte_carlo,
+                        in_axes=(0, multi_device.DATA_IN_AXES, 0, None),
+                        out_axes=(multi_device.DATA_IN_AXES, 0),
+                        devices=self.devices,
+                    )
+                    compiled_optimizer_step = constants.pmap(
+                        optimizer_step,
+                        in_axes=(0, multi_device.DATA_IN_AXES, 0, 0),
+                        out_axes=(0, 0, 0, 0),
+                        devices=self.devices,
+                    )
+                else:
+                    # make_vmcmc_step already jits the single-device sampler.
+                    compiled_monte_carlo = monte_carlo
+                    compiled_optimizer_step = jax.jit(optimizer_step)
+                step_fn = make_split_training_step(
+                    compiled_monte_carlo, compiled_optimizer_step)
+            else:
+                step_fn = make_training_step(
+                    mcmc_step=monte_carlo,
+                    optimizer_step=optimizer_step,
+                    reset_if_nan=True,
+                    jit=not self.use_pmap,
+                )
+        else:
+            if constants.kfac_jax is None:
+                raise ImportError(
+                    'KFAC was selected but kfac_jax could not be imported. '
+                    'Install a version compatible with the active JAX version.')
+
+            def evaluate_kfac_loss(params, key, positions):
+                """KFAC loss with only walker positions on its pmap batch axis."""
+                data = networks.KANetsData(
+                    positions=positions,
+                    spins=self.spins,
+                    atoms=self.atoms,
+                    charges=self.charges,
+                )
+                return evaluate_loss(params, key, data)
+
+            def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
+                return self.learning_rate / (1.0 + t_ / self.learning_rate_decay)
+
+            val_and_grad = jax.value_and_grad(
+                evaluate_kfac_loss, argnums=0, has_aux=True)
+            optimizer = constants.kfac_jax.Optimizer(
+                val_and_grad,
+                l2_reg=self.kfac_l2_reg,
+                norm_constraint=self.kfac_norm_constraint,
+                value_func_has_aux=True,
+                value_func_has_rng=True,
+                learning_rate_schedule=learning_rate_schedule,
+                curvature_ema=self.kfac_cov_ema_decay,
+                inverse_update_period=self.kfac_invert_every,
+                min_damping=self.kfac_min_damping,
+                num_burnin_steps=0,
+                register_only_generic=self.kfac_register_only_generic,
+                estimation_mode='fisher_exact',
+                multi_device=True,
+                pmap_axis_name=constants.PMAP_AXIS_NAME,
+            )
+            pmapped_monte_carlo = constants.pmap(
+                monte_carlo,
+                in_axes=(0, multi_device.DATA_IN_AXES, 0, None),
+                out_axes=(multi_device.DATA_IN_AXES, 0),
+                devices=self.devices,
+            )
+            step_fn = make_kfac_training_step(
+                pmapped_monte_carlo,
+                optimizer,
+                damping=self.kfac_damping,
+            )
+        if (
+            self.use_pmap
+            and self.optimizer_name != 'kfac'
+            and not (
+                self.optimizer_name == 'rgn' and self.rgn_split_compilation)
+        ):
             step_fn = constants.pmap(
                 step_fn,
                 in_axes=(multi_device.DATA_IN_AXES, 0, 0, 0, None),
@@ -1606,14 +1779,25 @@ class VMCTrainer:
         return optimizer, step_fn
 
     def _build_train_state(self, params, optimizer, train_opt_state):
+        state_optimizer = optax.identity() if self.optimizer_name == 'kfac' else optimizer
         state = train_state.TrainState.create(
             apply_fn=lambda *_args, **_kwargs: None,
             params=params,
-            tx=optimizer,
+            tx=state_optimizer,
         )
         if train_opt_state is not None:
             state = state.replace(opt_state=train_opt_state)
         return state
+
+    def _initialize_kfac_state(self, state, optimizer, data, key):
+        # kfac_jax requires the initialization RNG to be identical on every
+        # device (training-step RNGs, in contrast, must be different).
+        _, init_key = jax.random.split(multi_device.canonical_key(key))
+        init_keys = multi_device.replicate(init_key, self.devices)
+        # kfac_jax pmaps every batch leaf.  Only positions carry a leading
+        # device axis; molecular metadata is closed over by evaluate_kfac_loss.
+        opt_state = optimizer.init(state.params, init_keys, data.positions)
+        return state.replace(opt_state=opt_state)
 
     def _run_train_loop(
         self,
@@ -1702,6 +1886,8 @@ class VMCTrainer:
                 step = state.step
                 state = self._build_train_state(params, optimizer, train_opt_state=None)
                 state = self._prepare_train_state_for_devices(state)
+                if self.optimizer_name == 'kfac':
+                    state = self._initialize_kfac_state(state, optimizer, data, key)
                 state = state.replace(step=step)
                 iterator.write(f'Extended MKAN grid to G={g_new} at train step {step_id}.')
                 self.run_manager.log_scalars('train', step_id, {'grid_G': float(g_new)})
@@ -1782,6 +1968,9 @@ class VMCTrainer:
                 mcmc_width=jnp.asarray(self.mcmc_width),
                 pmoves=np.full((self.adapt_frequency,), np.nan, dtype=np.float32),
             )
+            if self.optimizer_name == 'kfac' and train_opt_state is None:
+                state = self._initialize_kfac_state(
+                    state, optimizer, runtime.data, runtime.key)
             self._run_train_loop(
                 train_start_step=train_start_step,
                 runtime=runtime,
@@ -1802,4 +1991,5 @@ class VMCTrainer:
 def train(cfg: ml_collections.ConfigDict):
     """Main training loop entry."""
     trainer = VMCTrainer(cfg)
+    # breakpoint()
     trainer.run()

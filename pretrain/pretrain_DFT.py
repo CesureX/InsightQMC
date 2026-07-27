@@ -147,6 +147,7 @@ def pretrain_ks_dft(
     use_pmap: bool = False,
     devices=None,
     num_devices: int = 1,
+    step_jit: bool = True,
 ):
   """Performs pretraining to match the KAN orbitals to KS-DFT orbitals."""
   optimizer = optax.adam(3.e-4)
@@ -174,6 +175,8 @@ def pretrain_ks_dft(
         out_axes=(multi_device.DATA_IN_AXES, 0, 0, 0),
         devices=devices,
     )
+  elif step_jit:
+    pretrain_step = jax.jit(pretrain_step, static_argnums=4)
 
   if data is None:
     data = networks.KANetsData(

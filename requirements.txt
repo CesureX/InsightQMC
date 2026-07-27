@@ -2,6 +2,7 @@ absl-py==2.4.0
 aiofiles==25.1.0
 attrs==26.1.0
 chex==0.1.91
+distrax==0.1.9
 etils==1.14.0
 flax==0.12.7
 folx==0.2.20
@@ -14,6 +15,7 @@ jax-cuda12-pjrt==0.10.0
 jax-cuda12-plugin==0.10.0
 jaxlib==0.10.0
 jaxtyping==0.3.9
+kfac-jax @ git+https://github.com/google-deepmind/kfac-jax.git@e58fb9385fa2af862e6af98e7fec0f647f198ce0
 Markdown==3.10.2
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
@@ -54,6 +56,7 @@ tensorboard-data-server==0.7.2
 tensorstore==0.1.83
 toolz==1.1.0
 tqdm==4.67.3
+tfp-nightly==0.26.0.dev20260628
 treescope==0.1.10
 typing_extensions==4.15.0
 uvloop==0.22.1

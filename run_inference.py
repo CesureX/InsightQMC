@@ -105,6 +105,20 @@ def _kan_required_parameters_for_layer(
             'external_weights': use_external_weights,
             'add_bias': use_bias,
         }
+    if layer_type == 'fastkan':
+        return {
+            'D': _first_int(cfg.g, 8),
+            'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
+            'add_bias': use_bias,
+        }
+    if layer_type == 'relukan':
+        return {
+            'G': _first_int(cfg.g, 5),
+            'k': _first_int(cfg.k, 3),
+            'add_bias': use_bias,
+        }
+    if layer_type == 'wavkan':
+        return {'wavelet_type': 'mexican_hat', 'add_bias': use_bias}
     if layer_type == 'sine':
         return {
             'D': _first_int(cfg.k, 5),
@@ -175,13 +189,14 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     ).lower()
     if orbital_head_input_mode not in (
         'shared_rows',
+        'per_electron',
         'all_electrons',
         'global',
         'flatten',
     ):
         raise ValueError(
-            "orbital_head.input_mode must be 'shared_rows', 'all_electrons', "
-            "'global', or 'flatten'."
+            "orbital_head.input_mode must be 'shared_rows', 'per_electron', "
+            "'all_electrons', 'global', or 'flatten'."
         )
     orbital_head_hidden_dims = tuple(
         int(dim) for dim in orbital_head_cfg.get('hidden_dims', ())
@@ -251,6 +266,23 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 'D': _first_int(cfg.k, 5),
                 'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
                 'external_weights': bool(cfg.external_weights),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type == 'fastkan':
+            required_parameters = {
+                'D': _first_int(cfg.g, 8),
+                'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type == 'relukan':
+            required_parameters = {
+                'G': _first_int(cfg.g, 5),
+                'k': _first_int(cfg.k, 3),
+                'add_bias': bool(cfg.add_bias),
+            }
+        elif layer_type == 'wavkan':
+            required_parameters = {
+                'wavelet_type': 'mexican_hat',
                 'add_bias': bool(cfg.add_bias),
             }
         elif layer_type == 'sine':
