@@ -39,6 +39,15 @@ def _to_scalar(x):
     return float(jnp.asarray(x).reshape(-1)[0])
 
 
+def _count_trainable_parameters(params) -> int:
+    """Return the number of scalar values in the trainable parameter tree."""
+    return sum(
+        int(np.prod(leaf.shape))
+        for leaf in jax.tree_util.tree_leaves(params)
+        if hasattr(leaf, 'shape')
+    )
+
+
 def _first_int(values, default: int) -> int:
     if values is None:
         return default
@@ -1941,6 +1950,11 @@ class VMCTrainer:
             ) = self._build_networks()
             params, data, sharded_key, pretrain_start_step, train_start_step, pretrain_opt_state, train_opt_state = (
                 self._initialize_params_and_data(kan_init)
+            )
+            trainable_parameter_count = _count_trainable_parameters(params)
+            print(
+                f'Trainable parameters: {trainable_parameter_count:,} '
+                f'({trainable_parameter_count} total)'
             )
 
             params, data, sharded_key, pretrain_opt_state, train_start_step = self.pretrain_runner.run(

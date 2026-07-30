@@ -8,15 +8,14 @@ def default() -> ml_collections.ConfigDict:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     cfg = ml_collections.ConfigDict({
-        # 'batch_size': 32768,
-        'batch_size': 8192,
-        'layer_dims': [8, 8, 8, 6],
+        'batch_size': 32768,
+        'layer_dims': [8, 48, 48, 48, 64],
         'g': [10],
-        'k': [3], #7
+        'k': [3],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-2, 2],
-        'iterations': 2000,
-        'preiterations': 1000,
+        'iterations': 30000,
+        'preiterations': 3000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -41,14 +40,14 @@ def default() -> ml_collections.ConfigDict:
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
-        'ndeterminants': 1,
+        'ndeterminants': 4,
         'determinant_weights': True,
-        'laplacian_method': 'default',
+        'laplacian_method': 'folx',
         't_init': 0,
         'debug': False,
         # Optimizer used for the VMC energy minimization. Pretraining always
         # uses Adam. Supported values: 'adam', 'adamw', 'rgn', 'kfac'.
-        'optimizer': 'kfac',
+        'optimizer': 'adam',
         'learning_rate': 0.00002,
         'learning_rate_decay': 50000.0,
         'gradient_clip_norm': 1.0,
@@ -82,9 +81,8 @@ def default() -> ml_collections.ConfigDict:
         # 0 means use all local JAX devices. batch_size is the global batch and
         # must be divisible by the number of devices used.
         'num_devices': 0,
-        # 1 keeps HF/DFT pretraining on a single visible device; 0 follows
-        # num_devices so pretraining uses the same devices as VMC training.
-        'pretrain_num_devices': 1,
+        # Use four visible devices for HF/DFT pretraining.
+        'pretrain_num_devices': 4,
         'reset_optimizer_on_resume': False,
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
@@ -113,6 +111,66 @@ def default() -> ml_collections.ConfigDict:
             'width': None,
             'mult_arity': 2,
             'required_parameters': None,
+            # Parameter-count matching presets for basis_test.sh, calibrated for
+            # layer_dims=[8, 8, 8, 6]. WavKAN has no D/G/k capacity control and
+            # therefore remains a lightweight baseline.
+            'basis_required_parameters': {
+                'base': {
+                    'G': 10,
+                    'k': 3,
+                    'grid_range': (-2.0, 2.0),
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'spline': {
+                    'G': 10,
+                    'k': 3,
+                    'grid_range': (-2.0, 2.0),
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'chebyshev': {
+                    'D': 3,
+                    'flavor': 'exact',
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'legendre': {
+                    'D': 14,
+                    'flavor': None,
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'rbf': {
+                    'D': 14,
+                    'grid_range': (-2.0, 2.0),
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'sine': {
+                    'D': 14,
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'fourier': {
+                    'D': 7,
+                    'add_bias': True,
+                },
+                'fastkan': {
+                    'D': 14,
+                    'grid_range': (-2.0, 2.0),
+                    'add_bias': True,
+                },
+                'relukan': {
+                    'G': 9,
+                    'k': 3,
+                    'add_bias': True,
+                },
+                'wavkan': {
+                    'wavelet_type': 'mexican_hat',
+                    'add_bias': True,
+                },
+            },
             'orbital_head': {
                 # When enabled, MKAN first returns node features and this head maps
                 # those nodes to final orbital channels.
@@ -142,8 +200,8 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': 4096,
         },
         'system': {
-            'molecule': [system.Atom('Li', (0, 0, 0))],
-            'electrons': (2,1),
+            'molecule': [system.Atom('C', (0, 0, 0))],
+            'electrons': (4,2),
         },
         'jastrow': {
             'ee': True,
@@ -153,8 +211,8 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-            'root_dir': f'outputs/Li/{timestamp}',
-            'checkpoint_every': 50,
+            'root_dir': f'outputs/C/{timestamp}',
+            'checkpoint_every': 500,
             'metrics_every': 5,
             'resume': False,
             'enable_tensorboard': True,

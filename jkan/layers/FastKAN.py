@@ -1,6 +1,7 @@
 """FastKAN layer using fixed Gaussian RBFs and input layer normalization."""
 
 import jax.numpy as jnp
+from jax import lax
 from flax import nnx
 
 
@@ -51,7 +52,6 @@ class FastKANLayer(nnx.Module):
                     rngs.params(), (self.n_out, self.n_in), jnp.float32
                 )
             )
-            self.base_bias = nnx.Param(jnp.zeros((self.n_out,)))
         self.bias = nnx.Param(jnp.zeros((self.n_out,))) if add_bias else None
 
     def normalize(self, x):
@@ -69,7 +69,18 @@ class FastKANLayer(nnx.Module):
         )
 
     def __call__(self, x):
-        y = jnp.sum(self.edge_activations(x), axis=-1)
+        batch = x.shape[0]
+        basis = self.basis(x).reshape(batch, -1)
+        basis_weights = self.c_basis[...].reshape(self.n_out, -1)
+        y = jnp.matmul(
+            basis, basis_weights.T, precision=lax.Precision.HIGHEST
+        )
+        if self.use_base_update:
+            y += jnp.matmul(
+                self.base_activation(x),
+                self.c_res[...].T,
+                precision=lax.Precision.HIGHEST,
+            )
         if self.bias is not None:
             y += self.bias[...]
         return y
@@ -79,7 +90,6 @@ class FastKANLayer(nnx.Module):
         edges = jnp.einsum("bid,oid->boi", basis, self.c_basis[...])
         if self.use_base_update:
             edges += self.base_activation(x)[:, None, :] * self.c_res[...][None, :, :]
-            edges += self.base_bias[...][None, :, None] / self.n_in
         return edges
 
 

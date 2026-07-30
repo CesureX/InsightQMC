@@ -5,6 +5,7 @@ outputs/
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+jkan/jkan.ipynb
 
 # Virtual environments
 .venv/
