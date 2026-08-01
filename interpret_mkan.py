@@ -230,16 +230,85 @@ def _build_mkan(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any]) -> M
 
 def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") -> list[str]:
     names = []
+    mode = str(feature_mode).lower()
     for atom_idx in range(natoms):
+        if mode in (
+            "p_orbital_coulomb_ee",
+            "p_orbital_coulomb_ee12",
+            "cartesian_exp_coulomb_ee",
+        ):
+            names.extend(
+                [
+                    f"ae_x[{atom_idx}]",
+                    f"ae_y[{atom_idx}]",
+                    f"ae_z[{atom_idx}]",
+                    f"r_ae[{atom_idx}]",
+                    f"ae_x_exp_neg_Zr[{atom_idx}]",
+                    f"ae_y_exp_neg_Zr[{atom_idx}]",
+                    f"ae_z_exp_neg_Zr[{atom_idx}]",
+                    f"Z_over_1_plus_Zr[{atom_idx}]",
+                ]
+            )
+        elif mode in (
+            "physics_exp8",
+            "physics_exp_replace",
+            "exp_ee_aggregate",
+            "physics_exp_spin_ee9",
+            "exp_spin_ee9",
+        ):
+            names.extend(
+                [
+                    f"exp_neg_r_ae[{atom_idx}]",
+                    f"ae_x_exp_neg_r[{atom_idx}]",
+                    f"ae_y_exp_neg_r[{atom_idx}]",
+                    f"ae_z_exp_neg_r[{atom_idx}]",
+                ]
+            )
+        elif mode in ("ee_aggregate_angles", "ee_angles", "angular_ee_aggregate"):
+            names.extend(
+                [
+                    f"r_ae[{atom_idx}]",
+                    f"ae_x[{atom_idx}]",
+                    f"ae_y[{atom_idx}]",
+                    f"ae_z[{atom_idx}]",
+                    f"cos_theta[{atom_idx}]",
+                    f"cos_phi[{atom_idx}]",
+                    f"sin_phi[{atom_idx}]",
+                ]
+            )
+        else:
+            names.extend(
+                [
+                    f"r_ae[{atom_idx}]",
+                    f"ae_x[{atom_idx}]",
+                    f"ae_y[{atom_idx}]",
+                    f"ae_z[{atom_idx}]",
+                ]
+            )
+    if mode in ("physics_exp_spin_ee9", "exp_spin_ee9"):
         names.extend(
             [
-                f"r_ae[{atom_idx}]",
-                f"ae_x[{atom_idx}]",
-                f"ae_y[{atom_idx}]",
-                f"ae_z[{atom_idx}]",
+                "same_spin_exp_density",
+                "opposite_spin_exp_density",
+                "ee_exp_vec_x",
+                "ee_exp_vec_y",
+                "ee_exp_vec_z",
             ]
         )
-    if str(feature_mode).lower() in ("ee_aggregate", "ee_agg", "equivariant_ee"):
+    elif mode in (
+        "ee_aggregate",
+        "ee_agg",
+        "equivariant_ee",
+        "physics_exp8",
+        "physics_exp_replace",
+        "exp_ee_aggregate",
+        "p_orbital_coulomb_ee",
+        "p_orbital_coulomb_ee12",
+        "cartesian_exp_coulomb_ee",
+        "ee_aggregate_angles",
+        "ee_angles",
+        "angular_ee_aggregate",
+    ):
         names.extend(["ee_density", "ee_vec_x", "ee_vec_y", "ee_vec_z"])
     if len(names) < input_dim:
         names.extend([f"x{i}" for i in range(len(names), input_dim)])
@@ -249,6 +318,7 @@ def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") 
 def _make_features(
     positions,
     atoms,
+    charges,
     electrons,
     input_dim: int,
     sample_size: int | None,
@@ -258,11 +328,14 @@ def _make_features(
     positions = jnp.reshape(positions, (-1, nelectrons * 3))
 
     def single_position_features(pos):
+        spins = jnp.array([1] * int(electrons[0]) + [-1] * int(electrons[1]))
         return networks.construct_orbital_features(
             pos,
             atoms,
             ndim=3,
             feature_mode=feature_mode,
+            spins=spins,
+            charges=charges,
         )
 
     features = jax.vmap(single_position_features)(positions)
@@ -2567,6 +2640,7 @@ def main() -> None:
     features = _make_features(
         positions,
         atoms,
+        checkpoint_data.charges,
         tuple(cfg.system.electrons),
         spec["input_dim"],
         sample_size,

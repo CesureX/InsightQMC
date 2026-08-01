@@ -175,6 +175,11 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
 
     mkan_cfg = cfg.get('mkan', {})
     layer_type = str(mkan_cfg.get('layer_type', 'spline')).lower()
+    stream_merge_cfg = mkan_cfg.get('stream_merge', {})
+    mkan_stream_merge_enabled = bool(stream_merge_cfg.get('enabled', False))
+    mkan_stream_project_context = bool(stream_merge_cfg.get('project_context', True))
+    mkan_stream_projection_activation = str(stream_merge_cfg.get('projection_activation', 'silu'))
+    mkan_stream_projection_rwf = stream_merge_cfg.get('projection_rwf', None)
     mkan_input_dim = int(nfeatures if mkan_cfg.get('input_dim', None) is None else mkan_cfg.input_dim)
     orbital_output_dim = (
         (2 * ndeterminants * nelectrons)
@@ -301,13 +306,27 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
     else:
         required_parameters = dict(required_parameters)
 
-    model_template = MultKAN(
-        width=width,
-        layer_type=layer_type,
-        required_parameters=required_parameters,
-        mult_arity=mkan_cfg.get('mult_arity', 2),
-        seed=int(cfg.seed),
-    )
+    if mkan_stream_merge_enabled:
+        if any(isinstance(item, (list, tuple)) for item in width):
+            raise ValueError("mkan.stream_merge does not support multiplication-node width pairs.")
+        model_template = networks.FermiNetStreamKAN(
+            width=width,
+            electrons=electrons,
+            layer_type=layer_type,
+            required_parameters=required_parameters,
+            project_context=mkan_stream_project_context,
+            projection_activation=mkan_stream_projection_activation,
+            projection_rwf=mkan_stream_projection_rwf,
+            seed=int(cfg.seed),
+        )
+    else:
+        model_template = MultKAN(
+            width=width,
+            layer_type=layer_type,
+            required_parameters=required_parameters,
+            mult_arity=mkan_cfg.get('mult_arity', 2),
+            seed=int(cfg.seed),
+        )
     graphdef, _, static_state = nnx.split(model_template, nnx.Param, ...)
     static_state = _merge_static_state_with_template(
         static_state,
@@ -458,7 +477,6 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         return head(node_values)
 
     def orbitals_apply(params, pos, spins_, atoms_, charges_):
-        del spins_, charges_
         ae, ee, r_ae, r_ee = networks.construct_input_features(pos, atoms_, ndim=3)
         h_one = networks.orbital_features_from_components(
             ae,
@@ -466,6 +484,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
             r_ae,
             r_ee,
             feature_mode=orbital_feature_mode,
+            spins=spins_,
+            charges=charges_,
         )
         mkan_nodes = apply_mkan(params, h_one)
         orbital_values = apply_orbital_head(params, mkan_nodes)

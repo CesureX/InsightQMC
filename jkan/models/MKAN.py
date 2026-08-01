@@ -133,13 +133,22 @@ class MultKAN(nnx.Module):
     def _current_layer_parameters(self) -> dict:
         first_layer = self.layers[0]
         params = dict(self.required_parameters)
-        params["k"] = int(first_layer.k)
-        params["G"] = int(first_layer.grid.G)
-        params["grid_range"] = tuple(first_layer.grid.grid_range)
-        params["grid_e"] = float(first_layer.grid.grid_e)
-        params["residual"] = first_layer.residual
-        params["external_weights"] = first_layer.c_spl is not None
-        params["add_bias"] = first_layer.bias is not None
+        if hasattr(first_layer, "k"):
+            params["k"] = int(first_layer.k)
+        if hasattr(first_layer, "grid"):
+            params["G"] = int(first_layer.grid.G)
+            params["grid_range"] = tuple(first_layer.grid.grid_range)
+            params["grid_e"] = float(first_layer.grid.grid_e)
+        if hasattr(first_layer, "D"):
+            params["D"] = int(first_layer.D)
+        if hasattr(first_layer, "flavor"):
+            params["flavor"] = first_layer.flavor
+        params["residual"] = getattr(first_layer, "residual", None)
+        params["external_weights"] = (
+            getattr(first_layer, "c_spl", None) is not None
+            or getattr(first_layer, "c_ext", None) is not None
+        )
+        params["add_bias"] = getattr(first_layer, "bias", None) is not None
         return params
 
     @property
@@ -429,9 +438,9 @@ class MultKAN(nnx.Module):
         else:
             layer.c_basis = nnx.Param(layer.c_basis[...].at[out_idx, in_idx, :].set(0.0))
 
-        if layer.c_spl is not None:
+        if getattr(layer, "c_spl", None) is not None:
             layer.c_spl = nnx.Param(layer.c_spl[...].at[out_idx, in_idx].set(0.0))
-        if layer.residual is not None:
+        if getattr(layer, "residual", None) is not None and hasattr(layer, "c_res"):
             layer.c_res = nnx.Param(layer.c_res[...].at[out_idx, in_idx].set(0.0))
 
     def remove_edge(self, l, i, j):
@@ -496,9 +505,10 @@ class MultKAN(nnx.Module):
 
         dst_layer.n_in = int(in_ids.shape[0])
         dst_layer.n_out = int(out_ids.shape[0])
-        dst_layer.grid.G = int(src_layer.grid.G)
-        dst_layer.grid.grid_range = tuple(src_layer.grid.grid_range)
-        dst_layer.grid.grid_e = float(src_layer.grid.grid_e)
+        if hasattr(src_layer, "grid") and hasattr(dst_layer, "grid"):
+            dst_layer.grid.G = int(src_layer.grid.G)
+            dst_layer.grid.grid_range = tuple(src_layer.grid.grid_range)
+            dst_layer.grid.grid_e = float(src_layer.grid.grid_e)
 
         if self.layer_type == "base":
             old_basis = src_layer.c_basis[...].reshape(src_layer.n_out, src_layer.n_in, -1)
@@ -513,20 +523,28 @@ class MultKAN(nnx.Module):
         else:
             new_basis = jnp.take(jnp.take(src_layer.c_basis[...], out_ids, axis=0), in_ids, axis=1)
             dst_layer.c_basis = nnx.Param(new_basis)
-            dst_layer.grid.item = src_layer.grid.item[in_ids]
-            dst_layer.grid.n_nodes = int(in_ids.shape[0])
+            if hasattr(src_layer, "grid") and hasattr(dst_layer, "grid"):
+                dst_layer.grid.item = src_layer.grid.item[in_ids]
+                dst_layer.grid.n_nodes = int(in_ids.shape[0])
 
-        if src_layer.c_spl is not None:
+        if getattr(src_layer, "c_spl", None) is not None:
             dst_layer.c_spl = nnx.Param(jnp.take(jnp.take(src_layer.c_spl[...], out_ids, axis=0), in_ids, axis=1))
-        else:
+        elif hasattr(dst_layer, "c_spl"):
             dst_layer.c_spl = None
 
-        if src_layer.residual is not None:
+        if getattr(src_layer, "c_ext", None) is not None:
+            dst_layer.c_ext = nnx.Param(
+                jnp.take(jnp.take(src_layer.c_ext[...], out_ids, axis=0), in_ids, axis=1)
+            )
+        elif hasattr(dst_layer, "c_ext"):
+            dst_layer.c_ext = None
+
+        if getattr(src_layer, "residual", None) is not None and hasattr(src_layer, "c_res"):
             dst_layer.c_res = nnx.Param(jnp.take(jnp.take(src_layer.c_res[...], out_ids, axis=0), in_ids, axis=1))
 
-        if src_layer.bias is not None:
+        if getattr(src_layer, "bias", None) is not None:
             dst_layer.bias = nnx.Param(src_layer.bias[...][out_ids])
-        else:
+        elif hasattr(dst_layer, "bias"):
             dst_layer.bias = None
 
         if hasattr(src_layer, "edge_mask") and hasattr(dst_layer, "edge_mask"):

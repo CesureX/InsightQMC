@@ -316,6 +316,13 @@ class VMCTrainer:
         self.mkan_required_parameters = mkan_cfg.get('required_parameters', None)
         self.mkan_pretrain_phase_weight = float(mkan_cfg.get('pretrain_phase_weight', 1.0e-2))
         self.mkan_prune_mask_checkpoint = mkan_cfg.get('prune_mask_checkpoint', None)
+        stream_merge_cfg = mkan_cfg.get('stream_merge', {})
+        self.mkan_stream_merge_enabled = bool(stream_merge_cfg.get('enabled', False))
+        self.mkan_stream_project_context = bool(stream_merge_cfg.get('project_context', True))
+        self.mkan_stream_projection_activation = str(
+            stream_merge_cfg.get('projection_activation', 'silu')
+        )
+        self.mkan_stream_projection_rwf = stream_merge_cfg.get('projection_rwf', None)
         mkan_input_dim = mkan_cfg.get('input_dim', None)
         mkan_output_dim = mkan_cfg.get('output_dim', None)
         orbital_head_cfg = mkan_cfg.get('orbital_head', cfg.get('orbital_head', {}))
@@ -690,7 +697,6 @@ class VMCTrainer:
             return head(node_values)
 
         def orbitals_apply(params, pos, spins, atoms, charges):
-            del spins, charges
             ae, ee, r_ae, r_ee = _construct_input_features(pos, atoms, ndim=3)
             h_one = networks.orbital_features_from_components(
                 ae,
@@ -698,6 +704,8 @@ class VMCTrainer:
                 r_ae,
                 r_ee,
                 feature_mode=self.orbital_feature_mode,
+                spins=spins,
+                charges=charges,
             )
             mkan_nodes = apply_mkan(params, h_one)
             orbital_values = apply_orbital_head(params, mkan_nodes)
@@ -930,6 +938,8 @@ class VMCTrainer:
                 data.atoms,
                 ndim=3,
                 feature_mode=self.orbital_feature_mode,
+                spins=data.spins,
+                charges=data.charges,
             )
 
         samples = jax.vmap(single_position_features)(positions)
@@ -948,6 +958,19 @@ class VMCTrainer:
             width[-1] = self.mkan_output_dim
 
         required_parameters = self._mkan_required_parameters()
+        if self.mkan_stream_merge_enabled:
+            if any(isinstance(item, (list, tuple)) for item in width):
+                raise ValueError("mkan.stream_merge does not support multiplication-node width pairs.")
+            return networks.FermiNetStreamKAN(
+                width=width,
+                electrons=self.electrons,
+                layer_type=self.mkan_layer_type,
+                required_parameters=required_parameters,
+                project_context=self.mkan_stream_project_context,
+                projection_activation=self.mkan_stream_projection_activation,
+                projection_rwf=self.mkan_stream_projection_rwf,
+                seed=self.seed,
+            )
         return MultKAN(
             width=width,
             layer_type=self.mkan_layer_type,

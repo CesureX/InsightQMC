@@ -131,10 +131,17 @@ class ChebyshevLayer(nnx.Module):
         c_res, c_basis = self._initialize_params(init_scheme, seed)
 
         self.c_basis = nnx.Param(c_basis)
+        self.edge_mask = nnx.Variable(jnp.ones((n_out, n_in), dtype=jnp.float32))
 
         if residual is not None:
             self.c_res = nnx.Param(c_res)
-            
+
+    def set_edge_mask(self, in_idx: int, out_idx: int, value: float):
+        """Set the hard mask for edge ``in_idx -> out_idx``."""
+
+        mask = self.edge_mask[...].at[int(out_idx), int(in_idx)].set(float(value))
+        self.edge_mask = nnx.Variable(mask)
+
 
     def basis(self, x):
         """
@@ -581,6 +588,7 @@ class ChebyshevLayer(nnx.Module):
             act_w = self.c_basis[...] * self.c_ext[..., None] # (n_out, n_in, D+1)
         else:
             act_w = self.c_basis[...]
+        act_w = act_w * self.edge_mask[..., None]
 
         y = jnp.sum(Bi[:, None, :, :] * act_w[None, :, :, :], axis=(2, 3)) # (batch, n_out)
 
@@ -589,7 +597,7 @@ class ChebyshevLayer(nnx.Module):
             # Calculate residual activation
             res = self.residual(x) # (batch, n_in)
             # Multiply by trainable weights
-            res_w = self.c_res[...] # (n_out, n_in)
+            res_w = self.c_res[...] * self.edge_mask[...] # (n_out, n_in)
             full_res = jnp.sum(res[:, None, :] * res_w[None, :, :], axis=2) # (batch, n_out)
 
             y += full_res # (batch, n_out)
@@ -598,3 +606,35 @@ class ChebyshevLayer(nnx.Module):
             y += self.bias[...] # (batch, n_out)
         
         return y
+
+    def edge_activations(self, x):
+        """
+        Return the layer output together with per-edge activation values.
+
+        ``postacts`` has shape ``(batch, n_out, n_in)`` and contains each
+        input-to-output edge contribution before summing over input nodes.
+        """
+
+        Bi = self.basis(x)  # (batch, n_in, D+1)
+
+        if self.c_ext is not None:
+            act_w = self.c_basis[...] * self.c_ext[..., None]  # (n_out, n_in, D+1)
+        else:
+            act_w = self.c_basis[...]
+        act_w = act_w * self.edge_mask[..., None]
+
+        postacts = jnp.sum(
+            Bi[:, None, :, :] * act_w[None, :, :, :],
+            axis=3,
+        )  # (batch, n_out, n_in)
+
+        if self.residual is not None:
+            res = self.residual(x)  # (batch, n_in)
+            res_w = self.c_res[...] * self.edge_mask[...]  # (n_out, n_in)
+            postacts += res[:, None, :] * res_w[None, :, :]
+
+        y = jnp.sum(postacts, axis=2)
+        if self.bias is not None:
+            y += self.bias[...]
+
+        return y, {"preacts": x, "postacts": postacts}
