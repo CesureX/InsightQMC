@@ -11,8 +11,8 @@ def default() -> ml_collections.ConfigDict:
         'k': [10],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-3, 3],
-        'iterations': 100000,
-        'preiterations': 5000,
+        'iterations': 80000,
+        'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -93,8 +93,8 @@ def default() -> ml_collections.ConfigDict:
             # Orbital MKAN receives one electron feature row at a time:
             # For Li with orbital_features='ee_aggregate':
             # 1 atom * [r_ae, ae_x, ae_y, ae_z] + [ee_density, ee_vec].
-            # With orbital_head disabled, the final MKAN width/output_dim must be
-            # 2 * ndeterminants * nelectrons real channels for complex output.
+            # With orbital_head enabled, MKAN outputs compact node features and
+            # the shared head maps them to 2 * ndeterminants * nelectrons real channels.
             #'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
             'layer_type': 'chebyshev',
@@ -103,7 +103,7 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'sine'
             # 'layer_type': 'fourier'
             'input_dim': None,
-            'output_dim': 96,
+            'output_dim': 64,
             'stream_merge': {
                 # FermiNet-style propagation: before every MKAN layer, concatenate
                 # local electron features with global/same-spin/opposite-spin means,
@@ -114,9 +114,68 @@ def default() -> ml_collections.ConfigDict:
                 'projection_rwf': {'mean': 1.0, 'std': 0.1},
             },
             # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
-            'width': [8, 48, 48, 48, 96],
+            'width': None,
             'mult_arity': 2,
             'required_parameters': None,
+            # Presets used by basis_test.sh to switch MKAN basis types without
+            # touching the rest of the training configuration.
+            'basis_required_parameters': {
+                'base': {
+                    'G': 10,
+                    'k': 3,
+                    'grid_range': (-2.0, 2.0),
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'spline': {
+                    'G': 10,
+                    'k': 3,
+                    'grid_range': (-2.0, 2.0),
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'chebyshev': {
+                    'D': 3,
+                    'flavor': 'exact',
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'legendre': {
+                    'D': 14,
+                    'flavor': None,
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'rbf': {
+                    'D': 14,
+                    'grid_range': (-2.0, 2.0),
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'sine': {
+                    'D': 14,
+                    'external_weights': True,
+                    'add_bias': True,
+                },
+                'fourier': {
+                    'D': 7,
+                    'add_bias': True,
+                },
+                'fastkan': {
+                    'D': 14,
+                    'grid_range': (-2.0, 2.0),
+                    'add_bias': True,
+                },
+                'relukan': {
+                    'G': 9,
+                    'k': 3,
+                    'add_bias': True,
+                },
+                'wavkan': {
+                    'wavelet_type': 'mexican_hat',
+                    'add_bias': True,
+                },
+            },
             'orbital_head': {
                 # When enabled, MKAN first returns node features and this head maps
                 # those nodes to final orbital channels.
@@ -160,7 +219,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-        'root_dir': 'outputs/Li_0801_direct_no_head_8_48_48_48_96',
+        'root_dir': 'outputs/Li08011335_with_M_70k_testadam_test_version_with_0728',
             'checkpoint_every': 10000,
             'metrics_every': 5,
             'resume': False,

@@ -1,6 +1,7 @@
 """ReLU-KAN layer with compact, optionally trainable support intervals."""
 
 import jax.numpy as jnp
+from jax import lax
 from flax import nnx
 
 
@@ -52,7 +53,14 @@ class ReLUKANLayer(nnx.Module):
         return jnp.square(left * right) * (16.0 / jnp.power(width, 4))
 
     def __call__(self, x):
-        y = jnp.sum(self.edge_activations(x), axis=-1)
+        batch = x.shape[0]
+        basis = self.basis(x).reshape(batch, -1)
+        basis_weights = self.c_basis[...].reshape(self.n_out, -1)
+        y = jnp.matmul(
+            basis,
+            basis_weights.T,
+            precision=lax.Precision.HIGHEST,
+        )
         if self.bias is not None:
             y += self.bias[...]
         return y
