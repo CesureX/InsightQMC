@@ -87,7 +87,10 @@ class FastKANLayer(nnx.Module):
 
     def edge_activations(self, x):
         basis = self.basis(x)
-        edges = jnp.einsum("bid,oid->boi", basis, self.c_basis[...])
+        edges = jnp.matmul(
+            basis[:, None, :, None, :],
+            self.c_basis[...][None, :, :, :, None],
+        ).squeeze(axis=(-1, -2))
         if self.use_base_update:
             edges += self.base_activation(x)[:, None, :] * self.c_res[...][None, :, :]
         return edges

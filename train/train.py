@@ -31,6 +31,7 @@ from opt import (
     make_split_training_step,
     make_training_step,
 )
+from train.activation_range_analysis import analyze_activation_ranges
 from train.pretrain_runner import PretrainRunner
 from train.training_io import RunManager
 
@@ -325,6 +326,38 @@ class VMCTrainer:
         self.mkan_required_parameters = mkan_cfg.get('required_parameters', None)
         self.mkan_pretrain_phase_weight = float(mkan_cfg.get('pretrain_phase_weight', 1.0e-2))
         self.mkan_prune_mask_checkpoint = mkan_cfg.get('prune_mask_checkpoint', None)
+        stream_merge_cfg = mkan_cfg.get('stream_merge', {})
+        self.mkan_stream_merge_enabled = bool(stream_merge_cfg.get('enabled', False))
+        self.mkan_stream_project_context = bool(stream_merge_cfg.get('project_context', True))
+        self.mkan_stream_projection_activation = str(
+            stream_merge_cfg.get('projection_activation', 'silu')
+        )
+        self.mkan_stream_projection_rwf = stream_merge_cfg.get('projection_rwf', None)
+        range_cfg = mkan_cfg.get('activation_range_analysis', {})
+        self.activation_range_analysis_enabled = bool(range_cfg.get('enabled', False))
+        range_sample_size = range_cfg.get('sample_size', 4096)
+        self.activation_range_sample_size = (
+            None if range_sample_size is None else int(range_sample_size)
+        )
+        self.activation_range_seed = int(range_cfg.get('seed', self.seed))
+        self.activation_range_histogram_bins = int(range_cfg.get('histogram_bins', 100))
+        self.activation_range_inactive_threshold = float(
+            range_cfg.get('inactive_threshold', 1.0e-3)
+        )
+        if (
+            self.activation_range_sample_size is not None
+            and self.activation_range_sample_size <= 0
+        ):
+            raise ValueError('mkan.activation_range_analysis.sample_size must be positive or None.')
+        if self.activation_range_histogram_bins <= 0:
+            raise ValueError('mkan.activation_range_analysis.histogram_bins must be positive.')
+        if self.activation_range_inactive_threshold <= 0.0:
+            raise ValueError('mkan.activation_range_analysis.inactive_threshold must be positive.')
+        if self.mkan_stream_merge_enabled and self.mkan_prune_mask_checkpoint:
+            raise ValueError(
+                'mkan.prune_mask_checkpoint is not supported with mkan.stream_merge; '
+                'stream checkpoints contain context projectors and a different graph structure.'
+            )
         mkan_input_dim = mkan_cfg.get('input_dim', None)
         mkan_output_dim = mkan_cfg.get('output_dim', None)
         orbital_head_cfg = mkan_cfg.get('orbital_head', cfg.get('orbital_head', {}))
@@ -357,6 +390,16 @@ class VMCTrainer:
         self.orbital_head_required_parameters = orbital_head_cfg.get('required_parameters', None)
         self.orbital_head_mult_arity = orbital_head_cfg.get('mult_arity', self.mkan_mult_arity)
         self.mkan_input_dim = int(nfeatures if mkan_input_dim is None else mkan_input_dim)
+        expected_feature_dim = networks.orbital_feature_dimension(
+            self.natoms, self.orbital_feature_mode, ndim=3
+        )
+        if self.mkan_input_dim != expected_feature_dim:
+            raise ValueError(
+                f'Orbital feature mode {self.orbital_feature_mode!r} produces '
+                f'{expected_feature_dim} features for {self.natoms} atoms, but the '
+                f'effective MKAN input dimension is {self.mkan_input_dim}. Update '
+                'cfg.nfeatures or cfg.mkan.input_dim to match.'
+            )
         self.orbital_output_dim = (
             (2 * self.ndeterminants * self.nelectrons)
             if self.complex_output
@@ -407,6 +450,8 @@ class VMCTrainer:
         self.grid_extension_g_values = tuple(int(v) for v in grid_extension_cfg.get('g_values', ()))
         sample_size = grid_extension_cfg.get('sample_size', None)
         self.grid_extension_sample_size = None if sample_size is None else int(sample_size)
+        if self.grid_extension_sample_size is not None and self.grid_extension_sample_size <= 0:
+            raise ValueError('grid_extension.sample_size must be positive or None.')
         if self.grid_extension_enabled:
             if self.mkan_layer_type not in ('base', 'spline'):
                 raise ValueError(
@@ -699,7 +744,6 @@ class VMCTrainer:
             return head(node_values)
 
         def orbitals_apply(params, pos, spins, atoms, charges):
-            del spins, charges
             ae, ee, r_ae, r_ee = _construct_input_features(pos, atoms, ndim=3)
             h_one = networks.orbital_features_from_components(
                 ae,
@@ -707,6 +751,8 @@ class VMCTrainer:
                 r_ae,
                 r_ee,
                 feature_mode=self.orbital_feature_mode,
+                spins=spins,
+                charges=charges,
             )
             mkan_nodes = apply_mkan(params, h_one)
             orbital_values = apply_orbital_head(params, mkan_nodes)
@@ -931,6 +977,23 @@ class VMCTrainer:
         )
 
     def _grid_extension_samples(self, data: networks.KANetsData) -> jnp.ndarray:
+        samples = self._mkan_feature_samples(data)
+        if self.mkan_stream_merge_enabled:
+            # Preserve (configuration, electron, feature).  Context means in a
+            # stream model must be computed independently for every walker.
+            if self.grid_extension_sample_size is not None:
+                max_configurations = max(
+                    1, self.grid_extension_sample_size // self.nelectrons
+                )
+                samples = samples[:max_configurations]
+            return samples
+
+        samples = jnp.reshape(samples, (-1, self.mkan_input_dim))
+        if self.grid_extension_sample_size is not None:
+            samples = samples[:self.grid_extension_sample_size]
+        return samples
+
+    def _mkan_feature_samples(self, data: networks.KANetsData) -> jnp.ndarray:
         positions = jnp.reshape(data.positions, (-1, self.nelectrons * 3))
 
         def single_position_features(pos):
@@ -939,13 +1002,49 @@ class VMCTrainer:
                 data.atoms,
                 ndim=3,
                 feature_mode=self.orbital_feature_mode,
+                spins=data.spins,
+                charges=data.charges,
             )
 
         samples = jax.vmap(single_position_features)(positions)
-        samples = jnp.reshape(samples, (-1, self.mkan_input_dim))
-        if self.grid_extension_sample_size is not None:
-            samples = samples[:self.grid_extension_sample_size]
+        if samples.shape[-1] != self.mkan_input_dim:
+            raise ValueError(
+                f'MKAN features have width {samples.shape[-1]}, expected '
+                f'{self.mkan_input_dim}.'
+            )
         return samples
+
+    def _activation_range_samples(self, data: networks.KANetsData) -> jnp.ndarray:
+        samples = self._mkan_feature_samples(data)
+        sample_size = self.activation_range_sample_size
+
+        if self.mkan_stream_merge_enabled:
+            # Sample whole walkers so global/same-spin/opposite-spin contexts
+            # are never formed from electrons belonging to different walkers.
+            total_rows = int(samples.shape[0]) * self.nelectrons
+            if sample_size is None or sample_size >= total_rows:
+                return samples
+
+            sample_configurations = max(1, sample_size // self.nelectrons)
+            rng = np.random.default_rng(self.activation_range_seed)
+            indices = np.sort(
+                rng.choice(
+                    int(samples.shape[0]),
+                    size=min(sample_configurations, int(samples.shape[0])),
+                    replace=False,
+                )
+            )
+            return jnp.take(samples, jnp.asarray(indices), axis=0)
+
+        samples = jnp.reshape(samples, (-1, self.mkan_input_dim))
+        if sample_size is None or sample_size >= samples.shape[0]:
+            return samples
+
+        rng = np.random.default_rng(self.activation_range_seed)
+        indices = np.sort(
+            rng.choice(int(samples.shape[0]), size=sample_size, replace=False)
+        )
+        return jnp.take(samples, jnp.asarray(indices), axis=0)
 
     def _make_mkan_template(self):
         if self.mkan_width is None:
@@ -957,6 +1056,21 @@ class VMCTrainer:
             width[-1] = self.mkan_output_dim
 
         required_parameters = self._mkan_required_parameters()
+        if self.mkan_stream_merge_enabled:
+            if any(isinstance(item, (list, tuple)) for item in width):
+                raise ValueError(
+                    'mkan.stream_merge does not support multiplication-node width pairs.'
+                )
+            return networks.FermiNetStreamKAN(
+                width=width,
+                electrons=self.electrons,
+                layer_type=self.mkan_layer_type,
+                required_parameters=required_parameters,
+                project_context=self.mkan_stream_project_context,
+                projection_activation=self.mkan_stream_projection_activation,
+                projection_rwf=self.mkan_stream_projection_rwf,
+                seed=self.seed,
+            )
         return MultKAN(
             width=width,
             layer_type=self.mkan_layer_type,
@@ -1914,6 +2028,41 @@ class VMCTrainer:
 
             runtime = runtime.replace(data=data, key=key)
 
+        return state, runtime
+
+    def _run_activation_range_analysis(self, params, data) -> None:
+        if not self.activation_range_analysis_enabled:
+            return
+
+        print('Running final MKAN activation-range analysis ...')
+        try:
+            if not (isinstance(params, dict) and 'mkan' in params):
+                raise ValueError('Final parameters do not contain an mkan state.')
+            model = nnx.merge(
+                self._mkan_graphdef,
+                params['mkan'],
+                self._mkan_static_state,
+            )
+            if not hasattr(model, 'collect_layer_inputs'):
+                raise NotImplementedError(
+                    f'{type(model).__name__} has no collect_layer_inputs() interface.'
+                )
+            samples = self._activation_range_samples(data)
+            output_dir = self.run_manager.run_dir / 'activation_ranges'
+            summary = analyze_activation_ranges(
+                model=model,
+                samples=samples,
+                output_dir=output_dir,
+                histogram_bins=self.activation_range_histogram_bins,
+                inactive_threshold=self.activation_range_inactive_threshold,
+            )
+            print(
+                f"Activation-range analysis saved to {output_dir} "
+                f"({summary['sampled_rows']} sampled rows)."
+            )
+        except Exception as exc:
+            print(f'Warning: activation-range analysis failed: {exc}')
+
     def _run_output_analysis(self) -> None:
         if not bool(self.cfg.output.get('auto_analyze', True)):
             return
@@ -1985,7 +2134,7 @@ class VMCTrainer:
             if self.optimizer_name == 'kfac' and train_opt_state is None:
                 state = self._initialize_kfac_state(
                     state, optimizer, runtime.data, runtime.key)
-            self._run_train_loop(
+            state, runtime = self._run_train_loop(
                 train_start_step=train_start_step,
                 runtime=runtime,
                 state=state,
@@ -1994,6 +2143,10 @@ class VMCTrainer:
                 logabs_network=logabs_network,
                 log_network=log_network,
                 extend_mkan_grid=extend_mkan_grid,
+            )
+            self._run_activation_range_analysis(
+                self._host_params(state.params),
+                self._host_data(runtime.data),
             )
             completed_training = True
         finally:

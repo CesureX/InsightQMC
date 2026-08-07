@@ -148,7 +148,9 @@ class BaseLayer(nnx.Module):
         
         batch = x.shape[0]
         # Extend to shape (batch, n_in*n_out)
-        x_ext = jnp.einsum('ij,k->ikj', x, jnp.ones(self.n_out,)).reshape((batch, self.n_in * self.n_out))
+        x_ext = jnp.broadcast_to(
+            x[:, None, :], (batch, self.n_out, self.n_in)
+        ).reshape((batch, self.n_in * self.n_out))
         # Transpose to shape (n_in*n_out, batch)
         x_ext = jnp.transpose(x_ext, (1, 0))
         
@@ -507,7 +509,7 @@ class BaseLayer(nnx.Module):
         # the current coefficients and Bi(x) are the current spline basis functions
         Bi = self.basis(x) # (n_in*n_out, G+k, batch)
         ci = self.c_basis[...] # (n_in*n_out, G+k)
-        ciBi = jnp.einsum('ij,ijk->ik', ci, Bi) # (n_in*n_out, batch)
+        ciBi = jnp.matmul(ci[:, None, :], Bi).squeeze(axis=1) # (n_in*n_out, batch)
 
         # Update the grid
         self.grid.update(x, G_new)
@@ -567,7 +569,7 @@ class BaseLayer(nnx.Module):
         Bi = self.basis(x) # (n_in*n_out, G+k, batch)
         ci = self.c_basis[...] # (n_in*n_out, G+k)
         # Calculate spline activation
-        spl = jnp.einsum('ij,ijk->ik', ci, Bi) # (n_in*n_out, batch)
+        spl = jnp.matmul(ci[:, None, :], Bi).squeeze(axis=1) # (n_in*n_out, batch)
         # Transpose to shape (batch, n_in*n_out)
         spl = jnp.transpose(spl, (1,0))
 
@@ -583,7 +585,9 @@ class BaseLayer(nnx.Module):
         # Check if there is a residual function
         if self.residual is not None:
             # Extend x to shape (batch, n_in*n_out)
-            x_ext = jnp.einsum('ij,k->ikj', x, jnp.ones(self.n_out,)).reshape((batch, self.n_in * self.n_out))
+            x_ext = jnp.broadcast_to(
+                x[:, None, :], (batch, self.n_out, self.n_in)
+            ).reshape((batch, self.n_in * self.n_out))
             # Transpose to shape (n_in*n_out, batch)
             x_ext = jnp.transpose(x_ext, (1, 0))
             # Calculate residual activation - shape (batch, n_in*n_out)
@@ -618,7 +622,7 @@ class BaseLayer(nnx.Module):
 
         Bi = self.basis(x)  # (n_in*n_out, G+k, batch)
         ci = self.c_basis[...]  # (n_in*n_out, G+k)
-        spl = jnp.einsum('ij,ijk->ik', ci, Bi)  # (n_in*n_out, batch)
+        spl = jnp.matmul(ci[:, None, :], Bi).squeeze(axis=1)  # (n_in*n_out, batch)
         spl = jnp.transpose(spl, (1, 0))  # (batch, n_in*n_out)
 
         if self.c_spl is not None:
@@ -630,9 +634,9 @@ class BaseLayer(nnx.Module):
             edge_flat = spl
 
         if self.residual is not None:
-            x_ext = jnp.einsum('ij,k->ikj', x, jnp.ones(self.n_out,)).reshape(
-                (batch, self.n_in * self.n_out)
-            )
+            x_ext = jnp.broadcast_to(
+                x[:, None, :], (batch, self.n_out, self.n_in)
+            ).reshape((batch, self.n_in * self.n_out))
             x_ext = jnp.transpose(x_ext, (1, 0))
             res = jnp.transpose(self.residual(x_ext), (1, 0))
             cnst_res = jnp.expand_dims(self.c_res[...], axis=0).reshape(
@@ -1134,7 +1138,7 @@ class SplineLayer(nnx.Module):
         # the current coefficients and Bi(x) are the current spline basis functions
         Bi = self.basis(x).transpose(1, 0, 2) # (n_in, batch, G+k)
         ci = self.c_basis[...].transpose(1, 2, 0) # (n_in, G+k, n_out)
-        ciBi = jnp.einsum('ijk,ikm->ijm', Bi, ci) # (n_in, batch, n_out)
+        ciBi = jnp.matmul(Bi, ci) # (n_in, batch, n_out)
 
         # Update the grid
         self.grid.update(x, G_new)
@@ -1237,7 +1241,10 @@ class SplineLayer(nnx.Module):
             spl_w = self.c_basis[...]
         spl_w = spl_w * self.edge_mask[..., None]
 
-        postacts = jnp.einsum('bik,oik->boi', Bi, spl_w)
+        postacts = jnp.matmul(
+            Bi[:, None, :, None, :],
+            spl_w[None, :, :, :, None],
+        ).squeeze(axis=(-1, -2))
 
         if self.residual is not None:
             res = self.residual(x)

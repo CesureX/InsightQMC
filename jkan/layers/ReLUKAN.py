@@ -64,7 +64,11 @@ class ReLUKANLayer(nnx.Module):
         return y
 
     def edge_activations(self, x):
-        return jnp.einsum("bid,oid->boi", self.basis(x), self.c_basis[...])
+        basis = self.basis(x)
+        return jnp.matmul(
+            basis[:, None, :, None, :],
+            self.c_basis[...][None, :, :, :, None],
+        ).squeeze(axis=(-1, -2))
 
 
 def jax_relu(x):

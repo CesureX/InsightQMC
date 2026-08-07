@@ -6,7 +6,7 @@ from flax import nnx
 from typing import Union
 
 from .utils import solve_full_lstsq
-        
+
         
 class FourierLayer(nnx.Module):
     """
@@ -140,8 +140,8 @@ class FourierLayer(nnx.Module):
         cos_w = self.c_cos[...].transpose(1, 2, 0) # (n_in, D, n_out)
         sin_w = self.c_sin[...].transpose(1, 2, 0) # (n_in, D, n_out)
         
-        cosines = jnp.einsum('ijk,ikm->ijm', ci, cos_w) # (n_in, batch, n_out)
-        sines = jnp.einsum('ijk,ikm->ijm', si, sin_w) # (n_in, batch, n_out)
+        cosines = jnp.matmul(ci, cos_w) # (n_in, batch, n_out)
+        sines = jnp.matmul(si, sin_w) # (n_in, batch, n_out)
 
         # Update the degree order
         self.D = D_new
@@ -203,4 +203,3 @@ class FourierLayer(nnx.Module):
             y += self.bias[...] # (batch, n_out)
         
         return y
-        

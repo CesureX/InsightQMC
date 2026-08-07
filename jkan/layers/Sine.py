@@ -489,7 +489,7 @@ class SineLayer(nnx.Module):
         # the current coefficients and Bi(x) are the current Sine basis functions
         Bi = self.basis(x).transpose(1, 0, 2) # (n_in, batch, D)
         ci = self.c_basis[...].transpose(1, 2, 0) # (n_in, D, n_out)
-        ciBi = jnp.einsum('ijk,ikm->ijm', Bi, ci) # (n_in, batch, n_out)
+        ciBi = jnp.matmul(Bi, ci) # (n_in, batch, n_out)
 
         # Update the degree order
         self.D = D_new

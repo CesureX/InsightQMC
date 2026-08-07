@@ -87,7 +87,7 @@ def default() -> ml_collections.ConfigDict:
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
         'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
-        'envelope_degree': 7,
+        'envelope_degree': 1,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
@@ -107,6 +107,15 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'wavkan'
             'input_dim': None,
             'output_dim': None,
+            'stream_merge': {
+                # Before every KAN layer, merge each electron's local features
+                # with global, same-spin, and opposite-spin means.  Disabled by
+                # default so existing runs and checkpoints remain unchanged.
+                'enabled': False,
+                'project_context': True,
+                'projection_activation': 'silu',
+                'projection_rwf': {'mean': 1.0, 'std': 0.1},
+            },
             # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
             'width': None,
             'mult_arity': 2,
@@ -130,7 +139,7 @@ def default() -> ml_collections.ConfigDict:
                     'add_bias': True,
                 },
                 'chebyshev': {
-                    'D': 3,
+                    'D': 14,
                     'flavor': 'exact',
                     'external_weights': True,
                     'add_bias': True,
@@ -192,6 +201,17 @@ def default() -> ml_collections.ConfigDict:
             },
             'pretrain_phase_weight': 1.0e-2,
             'prune_mask_checkpoint': None,
+            # Analyze MKAN inputs once, after training has fully completed.
+            'activation_range_analysis': {
+                'enabled': True,
+                # Number of randomly selected electron-feature rows.
+                # Use None to analyze every available row.
+                'sample_size': 4096,
+                'seed': 42,
+                'histogram_bins': 100,
+                # Gaussian basis is considered inactive below this maximum value.
+                'inactive_threshold': 1.0e-3,
+            },
         },
         'grid_extension': {
             'enabled': False,

@@ -131,10 +131,19 @@ class ChebyshevLayer(nnx.Module):
         c_res, c_basis = self._initialize_params(init_scheme, seed)
 
         self.c_basis = nnx.Param(c_basis)
+        self.edge_mask = nnx.Variable(
+            jnp.ones((n_out, n_in), dtype=jnp.float32)
+        )
 
         if residual is not None:
             self.c_res = nnx.Param(c_res)
-            
+
+    def set_edge_mask(self, in_idx: int, out_idx: int, value: float):
+        """Set the hard mask for edge ``in_idx -> out_idx``."""
+
+        mask = self.edge_mask[...].at[int(out_idx), int(in_idx)].set(float(value))
+        self.edge_mask = nnx.Variable(mask)
+        return self
 
     def basis(self, x):
         """
@@ -534,7 +543,7 @@ class ChebyshevLayer(nnx.Module):
         # the current coefficients and Bi(x) are the current Chebyshev basis functions
         Bi = self.basis(x).transpose(1, 0, 2) # (n_in, batch, D+1)
         ci = self.c_basis[...].transpose(1, 2, 0) # (n_in, D+1, n_out)
-        ciBi = jnp.einsum('ijk,ikm->ijm', Bi, ci) # (n_in, batch, n_out)
+        ciBi = jnp.matmul(Bi, ci) # (n_in, batch, n_out)
 
         # Update the degree order
         self.D = D_new
@@ -573,24 +582,29 @@ class ChebyshevLayer(nnx.Module):
             >>> output = layer(x_batch)
         """
         
-        # Calculate basis activations
+        batch = x.shape[0]
+
+        # Calculate and flatten basis activations
         Bi = self.basis(x) # (batch, n_in, D+1)
+        act = Bi.reshape(batch, -1) # (batch, n_in * (D+1))
 
         # Check if external_weights == True
         if self.c_ext is not None:
             act_w = self.c_basis[...] * self.c_ext[..., None] # (n_out, n_in, D+1)
         else:
             act_w = self.c_basis[...]
+        act_w = act_w * self.edge_mask[..., None]
+        act_w = act_w.reshape(self.n_out, -1) # (n_out, n_in * (D+1))
 
-        y = jnp.sum(Bi[:, None, :, :] * act_w[None, :, :, :], axis=(2, 3)) # (batch, n_out)
+        y = jnp.matmul(act, act_w.T) # (batch, n_out)
 
         # Check if there is a residual function
         if self.residual is not None:
             # Calculate residual activation
             res = self.residual(x) # (batch, n_in)
             # Multiply by trainable weights
-            res_w = self.c_res[...] # (n_out, n_in)
-            full_res = jnp.sum(res[:, None, :] * res_w[None, :, :], axis=2) # (batch, n_out)
+            res_w = self.c_res[...] * self.edge_mask[...] # (n_out, n_in)
+            full_res = jnp.matmul(res, res_w.T) # (batch, n_out)
 
             y += full_res # (batch, n_out)
 
@@ -598,3 +612,34 @@ class ChebyshevLayer(nnx.Module):
             y += self.bias[...] # (batch, n_out)
         
         return y
+
+    def edge_activations(self, x):
+        """Return output and each input-to-output edge contribution.
+
+        ``postacts`` has shape ``(batch, n_out, n_in)``. Summing its last
+        axis and adding the optional bias exactly reproduces ``self(x)``.
+        """
+
+        Bi = self.basis(x)  # (batch, n_in, D+1)
+
+        if self.c_ext is not None:
+            act_w = self.c_basis[...] * self.c_ext[..., None]
+        else:
+            act_w = self.c_basis[...]
+        act_w = act_w * self.edge_mask[..., None]
+
+        postacts = jnp.matmul(
+            Bi[:, None, :, None, :],
+            act_w[None, :, :, :, None],
+        ).squeeze(axis=(-1, -2))  # (batch, n_out, n_in)
+
+        if self.residual is not None:
+            res = self.residual(x)
+            res_w = self.c_res[...] * self.edge_mask[...]
+            postacts += res[:, None, :] * res_w[None, :, :]
+
+        y = jnp.sum(postacts, axis=2)
+        if self.bias is not None:
+            y += self.bias[...]
+
+        return y, {"preacts": x, "postacts": postacts}

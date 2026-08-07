@@ -101,6 +101,15 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
     layer_type = str(mkan_cfg.get("layer_type", "spline")).lower()
     orbital_feature_mode = str(cfg.get("orbital_features", "one_body")).lower()
     mkan_input_dim = int(nfeatures if mkan_cfg.get("input_dim", None) is None else mkan_cfg.input_dim)
+    expected_feature_dim = networks.orbital_feature_dimension(
+        len(molecule), orbital_feature_mode, ndim=3
+    )
+    if mkan_input_dim != expected_feature_dim:
+        raise ValueError(
+            f"Orbital feature mode {orbital_feature_mode!r} produces "
+            f"{expected_feature_dim} features for {len(molecule)} atoms, but the "
+            f"effective MKAN input dimension is {mkan_input_dim}."
+        )
     orbital_output_dim = (
         (2 * ndeterminants * nelectrons)
         if bool(cfg.complex_output)
@@ -205,12 +214,22 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
         "orbital_head_enabled": orbital_head_enabled,
         "orbital_head_type": orbital_head_type,
         "orbital_feature_mode": orbital_feature_mode,
+        "stream_merge_enabled": bool(
+            mkan_cfg.get("stream_merge", {}).get("enabled", False)
+        ),
         "ndeterminants": ndeterminants,
     }
 
 
 def _build_mkan(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any]) -> MultKAN:
     spec = _mkan_width_and_params(cfg)
+    if spec["stream_merge_enabled"]:
+        raise ValueError(
+            "interpret_mkan does not yet support FermiNetStreamKAN checkpoints: "
+            "the context projectors change the graph interpreted between KAN layers. "
+            "run_inference.py supports these checkpoints; interpret_mkan.py and "
+            "prune_mkan.py currently require a standard MultKAN checkpoint."
+        )
     model_template = MultKAN(
         width=spec["width"],
         layer_type=spec["layer_type"],
@@ -230,16 +249,86 @@ def _build_mkan(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any]) -> M
 
 def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") -> list[str]:
     names = []
+    mode = str(feature_mode).lower()
     for atom_idx in range(natoms):
+        if mode in (
+            "p_orbital_coulomb_ee",
+            "p_orbital_coulomb_ee12",
+            "cartesian_exp_coulomb_ee",
+        ):
+            names.extend(
+                [
+                    f"ae_x[{atom_idx}]",
+                    f"ae_y[{atom_idx}]",
+                    f"ae_z[{atom_idx}]",
+                    f"r_ae[{atom_idx}]",
+                    f"ae_x_exp_neg_Zr[{atom_idx}]",
+                    f"ae_y_exp_neg_Zr[{atom_idx}]",
+                    f"ae_z_exp_neg_Zr[{atom_idx}]",
+                    f"Z_over_1_plus_Zr[{atom_idx}]",
+                ]
+            )
+        elif mode in (
+            "exp_one_body",
+            "physics_exp_one_body",
+            "physics_exp8",
+            "physics_exp_replace",
+            "exp_ee_aggregate",
+            "physics_exp_spin_ee9",
+            "exp_spin_ee9",
+        ):
+            names.extend(
+                [
+                    f"exp_neg_r_ae[{atom_idx}]",
+                    f"ae_x_exp_neg_r[{atom_idx}]",
+                    f"ae_y_exp_neg_r[{atom_idx}]",
+                    f"ae_z_exp_neg_r[{atom_idx}]",
+                ]
+            )
+        else:
+            names.extend(
+                [
+                    f"r_ae[{atom_idx}]",
+                    f"ae_x[{atom_idx}]",
+                    f"ae_y[{atom_idx}]",
+                    f"ae_z[{atom_idx}]",
+                ]
+            )
+    if mode in ("ee_aggregate_angles", "ee_angles", "angular_ee_aggregate"):
+        # The constructor flattens all one-body atom blocks first, followed by
+        # all angular atom blocks.
+        for atom_idx in range(natoms):
+            names.extend(
+                [
+                    f"cos_theta[{atom_idx}]",
+                    f"cos_phi[{atom_idx}]",
+                    f"sin_phi[{atom_idx}]",
+                ]
+            )
+    if mode in ("physics_exp_spin_ee9", "exp_spin_ee9"):
         names.extend(
             [
-                f"r_ae[{atom_idx}]",
-                f"ae_x[{atom_idx}]",
-                f"ae_y[{atom_idx}]",
-                f"ae_z[{atom_idx}]",
+                "same_spin_exp_density",
+                "opposite_spin_exp_density",
+                "ee_exp_vec_x",
+                "ee_exp_vec_y",
+                "ee_exp_vec_z",
             ]
         )
-    if str(feature_mode).lower() in ("ee_aggregate", "ee_agg", "equivariant_ee"):
+    elif mode in (
+        "ee_aggregate",
+        "ee_agg",
+        "equivariant_ee",
+        "physics_exp8",
+        "physics_exp_replace",
+        "exp_ee_aggregate",
+        "p_orbital_coulomb_ee",
+        "p_orbital_coulomb_ee12",
+        "cartesian_exp_coulomb_ee",
+        "ee_aggregate_angles",
+        "ee_angles",
+        "angular_ee_aggregate",
+    ):
         names.extend(["ee_density", "ee_vec_x", "ee_vec_y", "ee_vec_z"])
     if len(names) < input_dim:
         names.extend([f"x{i}" for i in range(len(names), input_dim)])
@@ -249,13 +338,22 @@ def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") 
 def _make_features(
     positions,
     atoms,
+    charges,
     electrons,
     input_dim: int,
     sample_size: int | None,
     feature_mode: str = "one_body",
+    spins=None,
 ):
     nelectrons = sum(electrons)
     positions = jnp.reshape(positions, (-1, nelectrons * 3))
+    if spins is None:
+        spin_groups = [
+            jnp.full((int(count),), 1 if idx == 0 else -idx)
+            for idx, count in enumerate(electrons)
+            if int(count) > 0
+        ]
+        spins = jnp.concatenate(spin_groups) if spin_groups else jnp.empty((0,))
 
     def single_position_features(pos):
         return networks.construct_orbital_features(
@@ -263,9 +361,15 @@ def _make_features(
             atoms,
             ndim=3,
             feature_mode=feature_mode,
+            spins=spins,
+            charges=charges,
         )
 
     features = jax.vmap(single_position_features)(positions)
+    if features.shape[-1] != input_dim:
+        raise ValueError(
+            f"Constructed feature width {features.shape[-1]}, expected {input_dim}."
+        )
     features = jnp.reshape(features, (-1, input_dim))
     if sample_size is not None:
         features = features[:sample_size]
@@ -2567,10 +2671,12 @@ def main() -> None:
     features = _make_features(
         positions,
         atoms,
+        checkpoint_data.charges,
         tuple(cfg.system.electrons),
         spec["input_dim"],
         sample_size,
         spec["orbital_feature_mode"],
+        spins=checkpoint_data.spins,
     )
 
     cache = model.get_act(features)

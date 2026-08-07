@@ -403,6 +403,7 @@ def _adaptive_ylim(
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         return None
+    finite_min = float(np.min(finite))
 
     lower_quantile = min(max(lower_quantile, 0.0), 1.0)
     upper_quantile = min(max(upper_quantile, lower_quantile), 1.0)
@@ -422,8 +423,38 @@ def _adaptive_ylim(
         high += pad
 
     if include_zero:
-        low = min(0.0, low)
+        low = 0.0 if finite_min >= 0.0 else min(0.0, low)
     return low, high
+
+
+def _adaptive_series_ylim(
+    item: ScalarSeries,
+    *,
+    rolling: int = 1,
+    ignore_initial_fraction: float = 0.1,
+    lower_quantile: float = 0.01,
+    upper_quantile: float = 0.99,
+    pad_fraction: float = 0.08,
+    include_zero: bool = False,
+) -> tuple[float, float] | None:
+    """Choose a detail-friendly y-range from the settled body of a series."""
+
+    values = np.asarray(item.values, dtype=np.float64)
+    if rolling > 1 and len(values) >= rolling:
+        values = _rolling_mean(values, rolling)
+    if len(values) == 0:
+        return None
+
+    ignore_initial_fraction = min(max(float(ignore_initial_fraction), 0.0), 0.9)
+    start = int(math.floor(len(values) * ignore_initial_fraction))
+    focus_values = values[start:]
+    return _adaptive_ylim(
+        focus_values,
+        lower_quantile=lower_quantile,
+        upper_quantile=upper_quantile,
+        pad_fraction=pad_fraction,
+        include_zero=include_zero,
+    )
 
 
 def make_plots(series: dict[str, ScalarSeries], run_dir: Path, out_dir: Path, tail: int | None, burnin_step: int | None, tail_fraction: float | None) -> None:
@@ -431,12 +462,18 @@ def make_plots(series: dict[str, ScalarSeries], run_dir: Path, out_dir: Path, ta
         raise RuntimeError(f"matplotlib is unavailable: {_MATPLOTLIB_ERROR}")
 
     training_loss_ylim = (
-        _adaptive_ylim(series["train/loss"].values, lower_quantile=0.005, upper_quantile=0.995)
+        _adaptive_series_ylim(series["train/loss"], rolling=100, lower_quantile=0.01, upper_quantile=0.99)
         if "train/loss" in series
         else None
     )
     variance_ylim = (
-        _adaptive_ylim(series["train/variance"].values, lower_quantile=0.0, upper_quantile=0.99, include_zero=True)
+        _adaptive_series_ylim(
+            series["train/variance"],
+            rolling=100,
+            lower_quantile=0.01,
+            upper_quantile=0.99,
+            include_zero=True,
+        )
         if "train/variance" in series
         else None
     )

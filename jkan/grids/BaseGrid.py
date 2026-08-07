@@ -107,7 +107,9 @@ class BaseGrid:
         batch = x.shape[0]
         
         # Extend to shape (batch, n_in*n_out)
-        x_ext = jnp.einsum('ij,k->ikj', x, jnp.ones(self.n_out,)).reshape((batch, self.n_in * self.n_out))
+        x_ext = jnp.broadcast_to(
+            x[:, None, :], (batch, self.n_out, self.n_in)
+        ).reshape((batch, self.n_in * self.n_out))
         # Transpose to shape (n_in*n_out, batch)
         x_ext = jnp.transpose(x_ext, (1, 0))
         # Sort inputs
@@ -151,4 +153,3 @@ class BaseGrid:
         # Update the grid value and size
         self.item = grid
         self.G = G_new
-        

@@ -131,15 +131,26 @@ class MultKAN(nnx.Module):
         return subnode_ids
 
     def _current_layer_parameters(self) -> dict:
+        """Return constructor parameters needed to rebuild a pruned layer."""
+
         first_layer = self.layers[0]
         params = dict(self.required_parameters)
-        params["k"] = int(first_layer.k)
-        params["G"] = int(first_layer.grid.G)
-        params["grid_range"] = tuple(first_layer.grid.grid_range)
-        params["grid_e"] = float(first_layer.grid.grid_e)
-        params["residual"] = first_layer.residual
-        params["external_weights"] = first_layer.c_spl is not None
-        params["add_bias"] = first_layer.bias is not None
+        if hasattr(first_layer, "k"):
+            params["k"] = int(first_layer.k)
+        if hasattr(first_layer, "grid"):
+            params["G"] = int(first_layer.grid.G)
+            params["grid_range"] = tuple(first_layer.grid.grid_range)
+            params["grid_e"] = float(first_layer.grid.grid_e)
+        if hasattr(first_layer, "D"):
+            params["D"] = int(first_layer.D)
+        if hasattr(first_layer, "flavor"):
+            params["flavor"] = first_layer.flavor
+        params["residual"] = getattr(first_layer, "residual", None)
+        params["external_weights"] = (
+            getattr(first_layer, "c_spl", None) is not None
+            or getattr(first_layer, "c_ext", None) is not None
+        )
+        params["add_bias"] = getattr(first_layer, "bias", None) is not None
         return params
 
     @property
@@ -238,8 +249,7 @@ class MultKAN(nnx.Module):
             if not hasattr(layer, "edge_activations"):
                 raise NotImplementedError(
                     f"{type(layer).__name__} does not expose edge_activations(). "
-                    "Currently the MKAN interpretability helpers support base "
-                    "and spline layers."
+                    "This MKAN cannot run attribution-based pruning."
                 )
 
             y, info = layer.edge_activations(x)
@@ -429,9 +439,9 @@ class MultKAN(nnx.Module):
         else:
             layer.c_basis = nnx.Param(layer.c_basis[...].at[out_idx, in_idx, :].set(0.0))
 
-        if layer.c_spl is not None:
+        if getattr(layer, "c_spl", None) is not None:
             layer.c_spl = nnx.Param(layer.c_spl[...].at[out_idx, in_idx].set(0.0))
-        if layer.residual is not None:
+        if getattr(layer, "residual", None) is not None and hasattr(layer, "c_res"):
             layer.c_res = nnx.Param(layer.c_res[...].at[out_idx, in_idx].set(0.0))
 
     def remove_edge(self, l, i, j):
@@ -496,9 +506,10 @@ class MultKAN(nnx.Module):
 
         dst_layer.n_in = int(in_ids.shape[0])
         dst_layer.n_out = int(out_ids.shape[0])
-        dst_layer.grid.G = int(src_layer.grid.G)
-        dst_layer.grid.grid_range = tuple(src_layer.grid.grid_range)
-        dst_layer.grid.grid_e = float(src_layer.grid.grid_e)
+        if hasattr(src_layer, "grid") and hasattr(dst_layer, "grid"):
+            dst_layer.grid.G = int(src_layer.grid.G)
+            dst_layer.grid.grid_range = tuple(src_layer.grid.grid_range)
+            dst_layer.grid.grid_e = float(src_layer.grid.grid_e)
 
         if self.layer_type == "base":
             old_basis = src_layer.c_basis[...].reshape(src_layer.n_out, src_layer.n_in, -1)
@@ -513,20 +524,28 @@ class MultKAN(nnx.Module):
         else:
             new_basis = jnp.take(jnp.take(src_layer.c_basis[...], out_ids, axis=0), in_ids, axis=1)
             dst_layer.c_basis = nnx.Param(new_basis)
-            dst_layer.grid.item = src_layer.grid.item[in_ids]
-            dst_layer.grid.n_nodes = int(in_ids.shape[0])
+            if hasattr(src_layer, "grid") and hasattr(dst_layer, "grid"):
+                dst_layer.grid.item = src_layer.grid.item[in_ids]
+                dst_layer.grid.n_nodes = int(in_ids.shape[0])
 
-        if src_layer.c_spl is not None:
+        if getattr(src_layer, "c_spl", None) is not None:
             dst_layer.c_spl = nnx.Param(jnp.take(jnp.take(src_layer.c_spl[...], out_ids, axis=0), in_ids, axis=1))
-        else:
+        elif hasattr(dst_layer, "c_spl"):
             dst_layer.c_spl = None
 
-        if src_layer.residual is not None:
+        if getattr(src_layer, "c_ext", None) is not None:
+            dst_layer.c_ext = nnx.Param(
+                jnp.take(jnp.take(src_layer.c_ext[...], out_ids, axis=0), in_ids, axis=1)
+            )
+        elif hasattr(dst_layer, "c_ext"):
+            dst_layer.c_ext = None
+
+        if getattr(src_layer, "residual", None) is not None and hasattr(src_layer, "c_res"):
             dst_layer.c_res = nnx.Param(jnp.take(jnp.take(src_layer.c_res[...], out_ids, axis=0), in_ids, axis=1))
 
-        if src_layer.bias is not None:
+        if getattr(src_layer, "bias", None) is not None:
             dst_layer.bias = nnx.Param(src_layer.bias[...][out_ids])
-        else:
+        elif hasattr(dst_layer, "bias"):
             dst_layer.bias = None
 
         if hasattr(src_layer, "edge_mask") and hasattr(dst_layer, "edge_mask"):
@@ -534,7 +553,17 @@ class MultKAN(nnx.Module):
                 jnp.take(jnp.take(src_layer.edge_mask[...], out_ids, axis=0), in_ids, axis=1)
             )
 
+    def _require_structural_pruning_support(self):
+        supported = {"base", "spline", "chebyshev"}
+        if self.layer_type not in supported:
+            raise NotImplementedError(
+                "Structural pruning currently supports only base, spline, and "
+                f"chebyshev layers; got {self.layer_type!r}."
+            )
+
     def _prune_with_active_nodes(self, active_nodes: Sequence[Sequence[int]]):
+        self._require_structural_pruning_support()
+
         active_nodes = [list(map(int, ids)) for ids in active_nodes]
         if len(active_nodes) != self.depth + 1:
             raise ValueError(f"Expected {self.depth + 1} active-node lists.")
@@ -586,6 +615,8 @@ class MultKAN(nnx.Module):
         Return a smaller MKAN with hidden nodes pruned by attribution.
         """
 
+        self._require_structural_pruning_support()
+
         if cache is None:
             cache = self._act_cache
         if cache is None:
@@ -619,6 +650,8 @@ class MultKAN(nnx.Module):
         The returned model keeps ``input_id`` so it can still be called with the
         original full feature matrix.
         """
+
+        self._require_structural_pruning_support()
 
         if active_inputs is None:
             if cache is None:
@@ -1196,3 +1229,38 @@ class MultKAN(nnx.Module):
             x = self._apply_multiplication(x, idx)
             x = self.node_scale[idx][...][None, :] * x + self.node_bias[idx][...][None, :]
         return x
+
+    def collect_layer_inputs(self, x):
+        """Collect each layer's raw and effective basis inputs.
+
+        The layer transition below intentionally mirrors :meth:`__call__` so
+        collecting diagnostics does not alter either the model state or the
+        values presented to later layers.  ``basis_input`` records the value
+        after a basis-specific input transform: FastKAN's LayerNorm and the
+        tanh domain mapping used by Chebyshev and Legendre layers.
+        """
+
+        records = []
+        x = self._prepare_input(x)
+
+        for idx, layer in enumerate(self.layers):
+            record = {
+                "layer": idx,
+                "raw_input": x,
+            }
+
+            if hasattr(layer, "normalize"):
+                record["basis_input"] = layer.normalize(x)
+            elif self.layer_type in ("chebyshev", "legendre"):
+                record["basis_input"] = jnp.tanh(x)
+            else:
+                record["basis_input"] = x
+
+            records.append(record)
+
+            x = layer(x)
+            x = self.subnode_scale[idx][...][None, :] * x + self.subnode_bias[idx][...][None, :]
+            x = self._apply_multiplication(x, idx)
+            x = self.node_scale[idx][...][None, :] * x + self.node_bias[idx][...][None, :]
+
+        return records
