@@ -5,13 +5,13 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-    'batch_size': 32768, 
-    'layer_dims': [8, 48, 48, 48, 96],
+    'batch_size': 4096, 
+    'layer_dims': [44, 80, 80, 80, 128],
         'g': [10],
         'k': [10],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-3, 3],
-        'iterations': 80000,
+        'iterations': 200000,
         'preiterations': 10000,
         'run_pretrain': True,
         'seed': 42,
@@ -26,7 +26,7 @@ def default() -> ml_collections.ConfigDict:
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 8,
+        'nfeatures': 44,
         'orbital_features': 'ee_aggregate',
         'mcmc_method': 'random_walk', # mala: guided/Langevin; random_walk: FermiNet-style Gaussian proposal
         'pretrain_mcmc_method': 'random_walk',
@@ -39,7 +39,7 @@ def default() -> ml_collections.ConfigDict:
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
-        'ndeterminants': 16,
+        'ndeterminants': 8,
         'determinant_weights': True,
         'laplacian_method': 'folx', # default or folx
         't_init': 0,
@@ -86,13 +86,13 @@ def default() -> ml_collections.ConfigDict:
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
         'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
-        'envelope_degree': 0,
+        'envelope_degree': 1,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
-            # For Li with orbital_features='ee_aggregate':
-            # 1 atom * [r_ae, ae_x, ae_y, ae_z] + [ee_density, ee_vec].
+            # For C4H6 with orbital_features='ee_aggregate':
+            # 10 atoms * [r_ae, ae_x, ae_y, ae_z] + [ee_density, ee_vec].
             # With orbital_head enabled, MKAN outputs compact node features and
             # the shared head maps them to 2 * ndeterminants * nelectrons real channels.
             #'layer_type': 'base',       # 原始 KAN B-spline
@@ -103,7 +103,7 @@ def default() -> ml_collections.ConfigDict:
             # 'layer_type': 'sine'
             # 'layer_type': 'fourier'
             'input_dim': None,
-            'output_dim': 64,
+            'output_dim': 128,
             'stream_merge': {
                 # FermiNet-style propagation: before every MKAN layer, concatenate
                 # local electron features with global/same-spin/opposite-spin means,
@@ -179,7 +179,7 @@ def default() -> ml_collections.ConfigDict:
             'orbital_head': {
                 # When enabled, MKAN first returns node features and this head maps
                 # those nodes to final orbital channels.
-                'enabled': False,
+                'enabled': True,
                 # type='mlp' with hidden_dims=[] is the shared linear map H M0 + b.
                 'type': 'mlp',
                 # shared_rows applies one shared head to every electron row of H.
@@ -205,10 +205,21 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': 4096,
         },
         'system': {
+            # Bicyclobutane (C4H6) atomic positions (in bohr) from provided table.
             'molecule': [
-                system.Atom('Li', (0.0, 0.0, 0.0)),
+                system.Atom('C', (0.0, 2.13792, 0.58661)),
+                system.Atom('C', (0.0, -2.13792, 0.58661)),
+                system.Atom('C', (1.41342, 0.0, -0.58924)),
+                system.Atom('C', (-1.41342, 0.0, -0.58924)),
+                system.Atom('H', (0.0, 2.33765, 2.64110)),
+                system.Atom('H', (0.0, 3.92566, -0.43023)),
+                system.Atom('H', (0.0, -2.33765, 2.64110)),
+                system.Atom('H', (0.0, -3.92566, -0.43023)),
+                system.Atom('H', (2.67285, 0.0, -2.19514)),
+                system.Atom('H', (-2.67285, 0.0, -2.19514)),
             ],
-            'electrons': (2, 1),
+            # Neutral C4H6 has 30 electrons -> closed-shell (15, 15).
+            'electrons': (15, 15),
         },
         'jastrow': {
             'ee': True, 
@@ -219,10 +230,10 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-        'root_dir': 'outputs/Li08011335_with_M_70k_testadam_test_version_with_0728',
+        'root_dir': 'outputs/C4H6_08071708_with_head_lmax1_44_80_80_80_128_4gpu',
             'checkpoint_every': 10000,
             'metrics_every': 5,
-            'resume': False,
+            'resume': True,
             'enable_tensorboard': True,
             'auto_analyze': True,
         },
