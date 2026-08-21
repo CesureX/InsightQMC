@@ -48,89 +48,15 @@ def _load_positions(path: Path | None, checkpoint_data) -> jnp.ndarray:
     return jnp.array(payload)
 
 
-def _first_int(values, default: int) -> int:
-    if values is None:
-        return default
-    arr = np.asarray(values).reshape(-1)
-    return int(arr[0]) if arr.size else default
-
-
-def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
-    if values is None:
-        return tuple(default)
-    arr = np.asarray(values)
-    if arr.ndim == 1 and arr.size >= 2:
-        return (float(arr[0]), float(arr[1]))
-    if arr.ndim >= 2 and arr.shape[-1] >= 2:
-        flat = arr.reshape(-1, arr.shape[-1])
-        return (float(flat[0, 0]), float(flat[0, 1]))
-    return tuple(default)
-
-
 def _kan_required_parameters_for_layer(
-    cfg: ml_collections.ConfigDict,
     layer_type: str,
     required_parameters,
-    *,
-    add_bias: bool | None = None,
-    external_weights: bool | None = None,
 ):
-    if required_parameters is not None:
-        return dict(required_parameters)
-
-    use_bias = bool(cfg.add_bias) if add_bias is None else bool(add_bias)
-    use_external_weights = (
-        bool(cfg.external_weights) if external_weights is None else bool(external_weights)
-    )
-    layer_type = str(layer_type).lower()
-    if layer_type in ('chebyshev', 'legendre'):
-        return {
-            'D': _first_int(cfg.k, 3),
-            'flavor': 'exact' if layer_type == 'chebyshev' else None,
-            'external_weights': use_external_weights,
-            'add_bias': use_bias,
-        }
-    if layer_type in ('base', 'spline'):
-        return {
-            'k': _first_int(cfg.k, 3),
-            'G': _first_int(cfg.g, 5),
-            'grid_range': _first_grid_range(cfg.grid_range),
-            'external_weights': use_external_weights,
-            'add_bias': use_bias,
-        }
-    if layer_type == 'rbf':
-        return {
-            'D': _first_int(cfg.k, 5),
-            'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
-            'external_weights': use_external_weights,
-            'add_bias': use_bias,
-        }
-    if layer_type == 'fastkan':
-        return {
-            'D': _first_int(cfg.g, 8),
-            'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
-            'add_bias': use_bias,
-        }
-    if layer_type == 'relukan':
-        return {
-            'G': _first_int(cfg.g, 5),
-            'k': _first_int(cfg.k, 3),
-            'add_bias': use_bias,
-        }
-    if layer_type == 'wavkan':
-        return {'wavelet_type': 'mexican_hat', 'add_bias': use_bias}
-    if layer_type == 'sine':
-        return {
-            'D': _first_int(cfg.k, 5),
-            'external_weights': use_external_weights,
-            'add_bias': use_bias,
-        }
-    if layer_type == 'fourier':
-        return {
-            'D': _first_int(cfg.k, 5),
-            'add_bias': use_bias,
-        }
-    raise ValueError(f'Unsupported KAN layer_type: {layer_type}')
+    if required_parameters is None:
+        raise ValueError(
+            f"Explicit required_parameters are required for KAN layer type {layer_type!r}."
+        )
+    return dict(required_parameters)
 
 
 def _array_partitions(sizes):
@@ -260,62 +186,9 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
         width[0] = mkan_input_dim
         width[-1] = mkan_output_dim
 
-    required_parameters = mkan_cfg.get('required_parameters', None)
-    if required_parameters is None:
-        if layer_type in ('chebyshev', 'legendre'):
-            required_parameters = {
-                'D': _first_int(cfg.k, 3),
-                'flavor': 'exact' if layer_type == 'chebyshev' else None,
-                'external_weights': bool(cfg.external_weights),
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type in ('base', 'spline'):
-            required_parameters = {
-                'k': _first_int(cfg.k, 3),
-                'G': _first_int(cfg.g, 5),
-                'grid_range': _first_grid_range(cfg.grid_range),
-                'external_weights': bool(cfg.external_weights),
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type == 'rbf':
-            required_parameters = {
-                'D': _first_int(cfg.k, 5),
-                'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
-                'external_weights': bool(cfg.external_weights),
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type == 'fastkan':
-            required_parameters = {
-                'D': _first_int(cfg.g, 8),
-                'grid_range': _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type == 'relukan':
-            required_parameters = {
-                'G': _first_int(cfg.g, 5),
-                'k': _first_int(cfg.k, 3),
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type == 'wavkan':
-            required_parameters = {
-                'wavelet_type': 'mexican_hat',
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type == 'sine':
-            required_parameters = {
-                'D': _first_int(cfg.k, 5),
-                'external_weights': bool(cfg.external_weights),
-                'add_bias': bool(cfg.add_bias),
-            }
-        elif layer_type == 'fourier':
-            required_parameters = {
-                'D': _first_int(cfg.k, 5),
-                'add_bias': bool(cfg.add_bias),
-            }
-        else:
-            raise ValueError(f'Unsupported inference MKAN layer_type: {layer_type}')
-    else:
-        required_parameters = dict(required_parameters)
+    required_parameters = _kan_required_parameters_for_layer(
+        layer_type, mkan_cfg.get('required_parameters', None)
+    )
 
     if mkan_stream_merge_enabled:
         if any(isinstance(item, (list, tuple)) for item in width):
@@ -366,10 +239,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 hidden_dims=orbital_head_hidden_dims,
                 layer_type=orbital_head_layer_type,
                 required_parameters=_kan_required_parameters_for_layer(
-                    cfg,
                     orbital_head_layer_type,
                     orbital_head_required_parameters,
-                    add_bias=orbital_head_bias,
                 ),
                 seed=int(cfg.seed) + 7919,
             )
@@ -381,10 +252,8 @@ def _build_network(cfg: ml_collections.ConfigDict, checkpoint: dict[str, Any] | 
                 width=orbital_head_width,
                 layer_type=orbital_head_layer_type,
                 required_parameters=_kan_required_parameters_for_layer(
-                    cfg,
                     orbital_head_layer_type,
                     orbital_head_required_parameters,
-                    add_bias=orbital_head_bias,
                 ),
                 mult_arity=orbital_head_mult_arity,
                 seed=int(cfg.seed) + 7919,

@@ -10,11 +10,7 @@ def default() -> ml_collections.ConfigDict:
     cfg = ml_collections.ConfigDict({
         'batch_size': 32768,
         'layer_dims': [8, 48, 48, 48, 64],
-        'g': [10],
-        'k': [3],
-        #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
-        'grid_range': [-2, 2],
-        'iterations': 30000,
+        'iterations': 150000,
         'preiterations': 3000,
         'run_pretrain': True,
         'seed': 42,
@@ -119,8 +115,16 @@ def default() -> ml_collections.ConfigDict:
             # Set to [n_sum, n_mult] pairs to open MKAN multiplication nodes.
             'width': None,
             'mult_arity': 2,
-            'required_parameters': None,
-            # Parameter-count matching presets for basis_test.sh, calibrated for
+            # Explicit parameters for the selected layer_type. Sweep scripts
+            # replace this mapping for each basis type or degree.
+            'required_parameters': {
+                'G': 10,
+                'k': 3,
+                'grid_range': (-2.0, 2.0),
+                'external_weights': True,
+                'add_bias': True,
+            },
+            # Parameter-count matching presets for experiment_sweep.sh, calibrated for
             # layer_dims=[8, 8, 8, 6]. WavKAN has no D/G/k capacity control and
             # therefore remains a lightweight baseline.
             'basis_required_parameters': {
@@ -183,7 +187,7 @@ def default() -> ml_collections.ConfigDict:
             'orbital_head': {
                 # When enabled, MKAN first returns node features and this head maps
                 # those nodes to final orbital channels.
-                'enabled': True,
+                'enabled': False,
                 # type='mlp' with hidden_dims=[] is the shared linear map H M0 + b.
                 'type': 'mlp',
                 # shared_rows applies one shared head to every electron row of H.

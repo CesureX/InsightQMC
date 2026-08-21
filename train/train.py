@@ -49,24 +49,26 @@ def _count_trainable_parameters(params) -> int:
     )
 
 
-def _first_int(values, default: int) -> int:
-    if values is None:
-        return default
-    arr = np.asarray(values).reshape(-1)
-    if arr.size == 0:
-        return default
-    return int(arr[0])
+_PARAMETER_CATEGORY_NAMES = {
+    'mkan': 'MKAN/KAN main network',
+    'orbital_head': 'Orbital head',
+    'envelope': 'Envelope',
+    'jastrow_ee': 'Electron-electron Jastrow',
+    'jastrow_en': 'Electron-nucleus Jastrow',
+    'det_weights': 'Determinant weights',
+}
 
 
-def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
-    if values is None:
-        return tuple(default)
-    arr = np.asarray(values)
-    if arr.ndim == 1 and arr.size >= 2:
-        return (float(arr[0]), float(arr[1]))
-    if arr.ndim >= 2 and arr.shape[-1] >= 2:
-        return (float(arr.reshape(-1, arr.shape[-1])[0, 0]), float(arr.reshape(-1, arr.shape[-1])[0, 1]))
-    return tuple(default)
+def _count_parameter_categories(params) -> dict[str, int]:
+    """Count trainable scalars grouped by the top-level parameter subtree."""
+    if not isinstance(params, dict):
+        return {'Model parameters': _count_trainable_parameters(params)}
+
+    return {
+        _PARAMETER_CATEGORY_NAMES.get(str(key), f'Other ({key})'):
+            _count_trainable_parameters(value)
+        for key, value in params.items()
+    }
 
 
 def _array_partitions(sizes):
@@ -164,10 +166,7 @@ class VMCTrainer:
         spins = [1] * self.electrons[0] + [-1] * self.electrons[1]
         self.spins = jnp.array([spins])
 
-        self.g = jnp.array(cfg.g)
-        self.k = jnp.array(cfg.k)
         self.layer_dims = jnp.array(cfg.layer_dims)
-        self.grid_range = cfg.grid_range
         self.orbital_feature_mode = str(cfg.get('orbital_features', 'one_body')).lower()
 
         self.seed = int(cfg.seed)
@@ -1119,72 +1118,19 @@ class VMCTrainer:
         self,
         layer_type: str,
         required_parameters,
-        *,
-        add_bias: Optional[bool] = None,
-        external_weights: Optional[bool] = None,
     ):
-        if required_parameters is not None:
-            return dict(required_parameters)
-
-        use_bias = self.add_bias if add_bias is None else bool(add_bias)
-        use_external_weights = (
-            self.external_weights if external_weights is None else bool(external_weights)
-        )
-
-        if layer_type in ('chebyshev', 'legendre'):
-            return {
-                'D': _first_int(self.k, 3),
-                'flavor': 'exact' if layer_type == 'chebyshev' else None,
-                'external_weights': use_external_weights,
-                'add_bias': use_bias,
-            }
-        if layer_type in ('base', 'spline'):
-            return {
-                'k': _first_int(self.k, 3),
-                'G': _first_int(self.g, 5),
-                'grid_range': _first_grid_range(self.grid_range),
-                'external_weights': use_external_weights,
-                'add_bias': use_bias,
-            }
-        if layer_type == 'rbf':
-            return {
-                'D': _first_int(self.k, 5),
-                'grid_range': _first_grid_range(self.grid_range, default=(-2.0, 2.0)),
-                'external_weights': use_external_weights,
-                'add_bias': use_bias,
-            }
-        if layer_type == 'fastkan':
-            return {
-                'D': _first_int(self.g, 8),
-                'grid_range': _first_grid_range(self.grid_range, default=(-2.0, 2.0)),
-                'add_bias': use_bias,
-            }
-        if layer_type == 'relukan':
-            return {
-                'G': _first_int(self.g, 5),
-                'k': _first_int(self.k, 3),
-                'add_bias': use_bias,
-            }
-        if layer_type == 'wavkan':
-            return {'wavelet_type': 'mexican_hat', 'add_bias': use_bias}
-        if layer_type == 'sine':
-            return {
-                'D': _first_int(self.k, 5),
-                'external_weights': use_external_weights,
-                'add_bias': use_bias,
-            }
-        if layer_type == 'fourier':
-            return {
-                'D': _first_int(self.k, 5),
-                'add_bias': use_bias,
-            }
-        raise ValueError(f'Unsupported KAN layer_type: {layer_type}')
+        if required_parameters is None:
+            raise ValueError(
+                f"Explicit required_parameters are required for KAN layer type {layer_type!r}. "
+                "Set mkan.required_parameters for the main network or "
+                "mkan.orbital_head.required_parameters for a KAN/MKAN orbital head."
+            )
+        return dict(required_parameters)
 
     def _orbital_head_required_parameters(self):
         return self._kan_required_parameters_for_layer(
             self.orbital_head_layer_type,
             self.orbital_head_required_parameters,
-            add_bias=self.orbital_head_bias,
         )
 
     def _mkan_required_parameters(self):
@@ -2105,6 +2051,17 @@ class VMCTrainer:
                 f'Trainable parameters: {trainable_parameter_count:,} '
                 f'({trainable_parameter_count} total)'
             )
+            print('Parameter breakdown:')
+            parameter_categories = _count_parameter_categories(params)
+            for category, count in sorted(
+                parameter_categories.items(), key=lambda item: item[1], reverse=True
+            ):
+                percentage = (
+                    100.0 * count / trainable_parameter_count
+                    if trainable_parameter_count
+                    else 0.0
+                )
+                print(f'  {category:<28} {count:>12,} ({percentage:6.2f}%)')
 
             params, data, sharded_key, pretrain_opt_state, train_start_step = self.pretrain_runner.run(
                 params=params,

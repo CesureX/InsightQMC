@@ -50,25 +50,6 @@ def _load_positions(path: Path | None, checkpoint_data) -> jnp.ndarray:
     return jnp.array(json.loads(path.read_text()))
 
 
-def _first_int(values, default: int) -> int:
-    if values is None:
-        return default
-    arr = np.asarray(values).reshape(-1)
-    return int(arr[0]) if arr.size else default
-
-
-def _first_grid_range(values, default=(-1.0, 1.0)) -> tuple[float, float]:
-    if values is None:
-        return tuple(default)
-    arr = np.asarray(values)
-    if arr.ndim == 1 and arr.size >= 2:
-        return (float(arr[0]), float(arr[1]))
-    if arr.ndim >= 2 and arr.shape[-1] >= 2:
-        flat = arr.reshape(-1, arr.shape[-1])
-        return (float(flat[0, 0]), float(flat[0, 1]))
-    return tuple(default)
-
-
 def _mkan_width_output_dim(width) -> int:
     last = list(width)[-1]
     if isinstance(last, (list, tuple)):
@@ -144,60 +125,10 @@ def _mkan_width_and_params(cfg: ml_collections.ConfigDict):
 
     required_parameters = mkan_cfg.get("required_parameters", None)
     if required_parameters is None:
-        if layer_type in ("base", "spline"):
-            required_parameters = {
-                "k": _first_int(cfg.k, 3),
-                "G": _first_int(cfg.g, 5),
-                "grid_range": _first_grid_range(cfg.grid_range),
-                "external_weights": bool(cfg.external_weights),
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type in ("chebyshev", "legendre"):
-            required_parameters = {
-                "D": _first_int(cfg.k, 3),
-                "flavor": "exact" if layer_type == "chebyshev" else None,
-                "external_weights": bool(cfg.external_weights),
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type == "rbf":
-            required_parameters = {
-                "D": _first_int(cfg.k, 5),
-                "grid_range": _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
-                "external_weights": bool(cfg.external_weights),
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type == "fastkan":
-            required_parameters = {
-                "D": _first_int(cfg.g, 8),
-                "grid_range": _first_grid_range(cfg.grid_range, default=(-2.0, 2.0)),
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type == "relukan":
-            required_parameters = {
-                "G": _first_int(cfg.g, 5),
-                "k": _first_int(cfg.k, 3),
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type == "wavkan":
-            required_parameters = {
-                "wavelet_type": "mexican_hat",
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type == "sine":
-            required_parameters = {
-                "D": _first_int(cfg.k, 5),
-                "external_weights": bool(cfg.external_weights),
-                "add_bias": bool(cfg.add_bias),
-            }
-        elif layer_type == "fourier":
-            required_parameters = {
-                "D": _first_int(cfg.k, 5),
-                "add_bias": bool(cfg.add_bias),
-            }
-        else:
-            raise ValueError(f"Unsupported MKAN layer_type={layer_type!r}.")
-    else:
-        required_parameters = dict(required_parameters)
+        raise ValueError(
+            f"Explicit mkan.required_parameters are required for layer type {layer_type!r}."
+        )
+    required_parameters = dict(required_parameters)
 
     return {
         "width": width,
