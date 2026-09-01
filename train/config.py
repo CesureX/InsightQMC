@@ -5,14 +5,14 @@ from tools.utils import system
 def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
-    'batch_size': 4096, 
-    'layer_dims': [44, 80, 80, 80, 128],
+    'batch_size': 8192,
+    'layer_dims': [24, 64, 32, 32, 32, 128],
         'g': [10],
-        'k': [10],
+        'k': [4],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-3, 3],
-        'iterations': 200000,
-        'preiterations': 10000,
+        'iterations': 300000,
+        'preiterations': 3000,
         'run_pretrain': True,
         'seed': 42,
         'seed_electrons_coords': 22,
@@ -20,17 +20,17 @@ def default() -> ml_collections.ConfigDict:
         'core_electrons': {},
         'pretrain_method': 'hf', #'pretrain_method': 'dft',
         'pretrain_basis': 'ccpvtz',
-        'pretrain_restricted': False,
+        'pretrain_restricted': True,
         'hf_states': 0,
         'hf_excitation_type': 'ordered',
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 44,
-        'orbital_features': 'ee_aggregate',
+        'nfeatures': 24,
+        'orbital_features': 'interaction_ee_spin',
         'mcmc_method': 'random_walk', # mala: guided/Langevin; random_walk: FermiNet-style Gaussian proposal
         'pretrain_mcmc_method': 'random_walk',
-        'mcmc_steps': 10,
+        'mcmc_steps': 40,
         'mcmc_width': 0.02,
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
@@ -39,7 +39,7 @@ def default() -> ml_collections.ConfigDict:
         'use_scan': False,
         'complex_output': True, #True is recommended for better performance
         'full_det': False,  # True: det(NxN); False: det(alpha) * det(beta)
-        'ndeterminants': 8,
+        'ndeterminants': 16,
         'determinant_weights': True,
         'laplacian_method': 'folx', # default or folx
         't_init': 0,
@@ -86,13 +86,14 @@ def default() -> ml_collections.ConfigDict:
         'resize_resumed_noise': 0.0,
         'envelope_on': True,
         'envelope_type': 'ferminet_angular', # isotropic, chebyshev, legendre, legendre_anisotropic, angular_momentum, legendre_angular, complex_angular_momentum, ferminet_angular
-        'envelope_degree': 1,
+        'envelope_degree': 0,
         'add_bias': True,
         'external_weights': True,
         'mkan': {
             # Orbital MKAN receives one electron feature row at a time:
-            # For C4H6 with orbital_features='ee_aggregate':
-            # 10 atoms * [r_ae, ae_x, ae_y, ae_z] + [ee_density, ee_vec].
+            # For a one-atom system with orbital_features='interaction_ee_spin':
+            # 1 atom * [ae, r_ae, ae * exp(-Zr), Z/(1 + Zr)]
+            # + same-/opposite-spin ee summaries using 1/(1+r_ij) and exp(-r_ij).
             # With orbital_head enabled, MKAN outputs compact node features and
             # the shared head maps them to 2 * ndeterminants * nelectrons real channels.
             #'layer_type': 'base',       # 原始 KAN B-spline
@@ -100,8 +101,8 @@ def default() -> ml_collections.ConfigDict:
             'layer_type': 'chebyshev',
             # 'layer_type': 'legendre'
             # 'layer_type': 'rbf'
-            # 'layer_type': 'sine'
-            # 'layer_type': 'fourier'
+             #'layer_type': 'sine',
+            #'layer_type': 'fourier',
             'input_dim': None,
             'output_dim': 128,
             'stream_merge': {
@@ -122,20 +123,20 @@ def default() -> ml_collections.ConfigDict:
             'basis_required_parameters': {
                 'base': {
                     'G': 10,
-                    'k': 3,
+                    'k': 7,
                     'grid_range': (-2.0, 2.0),
                     'external_weights': True,
                     'add_bias': True,
                 },
                 'spline': {
                     'G': 10,
-                    'k': 3,
+                    'k': 7,
                     'grid_range': (-2.0, 2.0),
                     'external_weights': True,
                     'add_bias': True,
                 },
                 'chebyshev': {
-                    'D': 3,
+                    'D': 7,
                     'flavor': 'exact',
                     'external_weights': True,
                     'add_bias': True,
@@ -205,24 +206,13 @@ def default() -> ml_collections.ConfigDict:
             'sample_size': 4096,
         },
         'system': {
-            # Bicyclobutane (C4H6) atomic positions (in bohr) from provided table.
             'molecule': [
-                system.Atom('C', (0.0, 2.13792, 0.58661)),
-                system.Atom('C', (0.0, -2.13792, 0.58661)),
-                system.Atom('C', (1.41342, 0.0, -0.58924)),
-                system.Atom('C', (-1.41342, 0.0, -0.58924)),
-                system.Atom('H', (0.0, 2.33765, 2.64110)),
-                system.Atom('H', (0.0, 3.92566, -0.43023)),
-                system.Atom('H', (0.0, -2.33765, 2.64110)),
-                system.Atom('H', (0.0, -3.92566, -0.43023)),
-                system.Atom('H', (2.67285, 0.0, -2.19514)),
-                system.Atom('H', (-2.67285, 0.0, -2.19514)),
+                system.Atom('Be', (0.0, 0.0, 0.0), units='bohr'),
             ],
-            # Neutral C4H6 has 30 electrons -> closed-shell (15, 15).
-            'electrons': (15, 15),
+            'electrons': (2, 2),
         },
         'jastrow': {
-            'ee': True, 
+            'ee': True,
             'en': True,
             'en_mode': 'fixed_cusp', # legacy keeps old pure-polynomial J_en for old checkpoints; fixed_cusp adds Kato electron-nucleus cusp
             'en_radial_order': 6,
@@ -230,10 +220,10 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-        'root_dir': 'outputs/C4H6_08071708_with_head_lmax1_44_80_80_80_128_4gpu',
+        'root_dir': 'outputs/Be09011636_with_M__4gpu_k5_inputfeaturetry_64_32_32_32_128_chev',
             'checkpoint_every': 10000,
             'metrics_every': 5,
-            'resume': True,
+            'resume': False,
             'enable_tensorboard': True,
             'auto_analyze': True,
         },

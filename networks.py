@@ -309,6 +309,9 @@ def construct_orbital_features(
     ``p_orbital_coulomb_ee`` uses per-atom features
     [x, y, z, r, x exp(-Zr), y exp(-Zr), z exp(-Zr), Z/(1+Zr)]
     and appends the four stable electron-electron aggregate features.
+    ``interaction_ee_spin`` uses the same charge-scaled one-body features and
+    appends same-/opposite-spin electron-electron aggregates with stable
+    Coulomb and exponential radial kernels.
     ``ee_aggregate_angles`` augments ``ee_aggregate`` with stable angular
     features [cos(theta), cos(phi), sin(phi)] for each electron-nucleus vector.
     """
@@ -358,6 +361,10 @@ def orbital_features_from_components(
         "p_orbital_coulomb_ee",
         "p_orbital_coulomb_ee12",
         "cartesian_exp_coulomb_ee",
+        "interaction_ee_spin",
+        "rich_interaction_ee",
+        "p_orbital_spin_ee",
+        "spin_coulomb_exp_ee",
         "ee_aggregate_angles",
         "ee_angles",
         "angular_ee_aggregate",
@@ -369,6 +376,62 @@ def orbital_features_from_components(
     inv_weight = offdiag / (1.0 + r_ee)
     ee_density = jnp.sum(inv_weight, axis=1)
     ee_vector = jnp.sum(-ee * inv_weight, axis=1)
+
+    if mode in (
+        "interaction_ee_spin",
+        "rich_interaction_ee",
+        "p_orbital_spin_ee",
+        "spin_coulomb_exp_ee",
+    ):
+        if charges is None:
+            raise ValueError(f"feature_mode={feature_mode!r} requires atom charges.")
+        if spins is None:
+            raise ValueError(f"feature_mode={feature_mode!r} requires spin labels.")
+        z = jnp.reshape(jnp.asarray(charges, dtype=ae.dtype), (1, -1, 1))
+        z_exp_decay = jnp.exp(-z * r_ae)
+        stable_coulomb = z / (1.0 + z * r_ae)
+        atom_features = jnp.concatenate(
+            (ae, r_ae, ae * z_exp_decay, stable_coulomb),
+            axis=2,
+        ).reshape(ae.shape[0], -1)
+
+        spin_labels = jnp.reshape(spins, (-1,))[:n]
+        same_mask = (
+            spin_labels[:, None] == spin_labels[None, :]
+        ).astype(ae.dtype)[..., None] * offdiag
+        opposite_mask = (
+            spin_labels[:, None] != spin_labels[None, :]
+        ).astype(ae.dtype)[..., None] * offdiag
+        exp_kernel = jnp.exp(-r_ee)
+
+        def spin_aggregate(mask, kernel):
+            weight = mask * kernel
+            return jnp.sum(weight, axis=1), jnp.sum(-ee * weight, axis=1)
+
+        same_inv_density, same_inv_vector = spin_aggregate(
+            same_mask, 1.0 / (1.0 + r_ee)
+        )
+        opposite_inv_density, opposite_inv_vector = spin_aggregate(
+            opposite_mask, 1.0 / (1.0 + r_ee)
+        )
+        same_exp_density, same_exp_vector = spin_aggregate(same_mask, exp_kernel)
+        opposite_exp_density, opposite_exp_vector = spin_aggregate(
+            opposite_mask, exp_kernel
+        )
+        return jnp.concatenate(
+            (
+                atom_features,
+                same_inv_density,
+                same_inv_vector,
+                opposite_inv_density,
+                opposite_inv_vector,
+                same_exp_density,
+                same_exp_vector,
+                opposite_exp_density,
+                opposite_exp_vector,
+            ),
+            axis=1,
+        )
 
     if mode in (
         "p_orbital_coulomb_ee",

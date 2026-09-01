@@ -138,7 +138,7 @@ def pretrain_scalar_wavefunction(
   opt_state_pt = optimizer.init(params) if opt_state is None else opt_state
   devices = tuple(devices) if devices is not None else tuple(jax.local_devices()[:num_devices])
 
-  pretrain_step = make_pretrain_step(
+  pretrain_step_fn = make_pretrain_step(
       batch_network=batch_network,
       batch_log_network=batch_log_network,
       optimizer_update=optimizer.update,
@@ -151,12 +151,17 @@ def pretrain_scalar_wavefunction(
       mcmc_jit=not use_pmap,
   )
   if use_pmap:
+    def pretrain_step_with_reference(data, params, state, key):
+      return pretrain_step_fn(data, params, state, key, scf_approx)
+
     pretrain_step = constants.pmap(
-        pretrain_step,
-        in_axes=(multi_device.DATA_IN_AXES, 0, 0, 0, None),
+        pretrain_step_with_reference,
+        in_axes=(multi_device.DATA_IN_AXES, 0, 0, 0),
         out_axes=(multi_device.DATA_IN_AXES, 0, 0, 0),
         devices=devices,
     )
+  else:
+    pretrain_step = pretrain_step_fn
 
   if data is None:
     data = networks.KANetsData(
@@ -173,8 +178,12 @@ def pretrain_scalar_wavefunction(
 
   for t in iterator:
     sharded_key, subkeys = multi_device.split_step_key(sharded_key, num_devices, use_pmap)
-    data, params, opt_state_pt, loss = pretrain_step(
-        data, params, opt_state_pt, subkeys, scf_approx)
+    if use_pmap:
+      data, params, opt_state_pt, loss = pretrain_step(
+          data, params, opt_state_pt, subkeys)
+    else:
+      data, params, opt_state_pt, loss = pretrain_step(
+          data, params, opt_state_pt, subkeys, scf_approx)
     step = t + 1
     loss_value = float(jnp.mean(jnp.real(loss)))
     iterator.set_postfix(iter=step, loss=f'{loss_value:.6f}')

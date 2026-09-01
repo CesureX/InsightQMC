@@ -12,14 +12,14 @@ JAX_PLATFORMS=cpu /vepfs-mlp2/c20250516/250504030/env/qmc/bin/python prune_mkan.
   cd /vepfs-mlp2/c20250516/252703012/InsightQMC
 
 JAX_PLATFORMS=cpu /vepfs-mlp2/c20250516/250504030/env/qmc/bin/python prune_mkan.py \
-  --run-dir outputs/C2H5OH_08071838_with_head_lmax1_40_80_80_80_128_4gpu \
+  --run-dir outputs/O3_08071507_with_head_lmax1_16_80_80_80_128_4gpu \
   --prune-mode node \
   --sample-size 4096 \
   --node-keep-fractions 0.7,0.5,0.3 \
-  --out-run-dir outputs/C2H5OH_08071838_with_head_lmax1_40_80_80_80_128_4gpu_prune_keep70_50_30 \
+  --out-run-dir outputs/O3_08071507_with_head_lmax1_16_80_80_80_128_4gpu_prune_keep70_50_30 \
   --write-config \
   --config-resume \
-  --config-iterations 200000 \
+  --config-iterations 300000 \
   --drop-opt-state \
   --overwrite
 
@@ -48,8 +48,8 @@ from pathlib import Path
 from interpret_mkan import _load_config
 from train import train
 
-cfg = _load_config(Path("outputs/C2H5OH_08071838_with_head_lmax1_40_80_80_80_128_4gpu_prune_keep70_50_30/config.json"))
-cfg.iterations = 200000
+cfg = _load_config(Path("outputs/O3_08071507_with_head_lmax1_16_80_80_80_128_4gpu_prune_keep70_50_30/config.json"))
+cfg.iterations = 300000
 train.train(cfg)
 PY
 

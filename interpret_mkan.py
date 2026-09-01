@@ -236,6 +236,10 @@ def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") 
             "p_orbital_coulomb_ee",
             "p_orbital_coulomb_ee12",
             "cartesian_exp_coulomb_ee",
+            "interaction_ee_spin",
+            "rich_interaction_ee",
+            "p_orbital_spin_ee",
+            "spin_coulomb_exp_ee",
         ):
             names.extend(
                 [
@@ -293,6 +297,32 @@ def _feature_names(natoms: int, input_dim: int, feature_mode: str = "one_body") 
                 "ee_exp_vec_x",
                 "ee_exp_vec_y",
                 "ee_exp_vec_z",
+            ]
+        )
+    elif mode in (
+        "interaction_ee_spin",
+        "rich_interaction_ee",
+        "p_orbital_spin_ee",
+        "spin_coulomb_exp_ee",
+    ):
+        names.extend(
+            [
+                "same_spin_inv_density",
+                "same_spin_inv_vec_x",
+                "same_spin_inv_vec_y",
+                "same_spin_inv_vec_z",
+                "opposite_spin_inv_density",
+                "opposite_spin_inv_vec_x",
+                "opposite_spin_inv_vec_y",
+                "opposite_spin_inv_vec_z",
+                "same_spin_exp_density",
+                "same_spin_exp_vec_x",
+                "same_spin_exp_vec_y",
+                "same_spin_exp_vec_z",
+                "opposite_spin_exp_density",
+                "opposite_spin_exp_vec_x",
+                "opposite_spin_exp_vec_y",
+                "opposite_spin_exp_vec_z",
             ]
         )
     elif mode in (
