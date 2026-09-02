@@ -312,6 +312,9 @@ def construct_orbital_features(
     ``interaction_ee_spin`` uses the same charge-scaled one-body features and
     appends same-/opposite-spin electron-electron aggregates with stable
     Coulomb and exponential radial kernels.
+    ``interaction_ee_spin16`` is its compact 16-dimensional one-atom variant:
+    it keeps the charge-scaled one-body features and only the same-/opposite-
+    spin Coulomb-kernel aggregates.
     ``ee_aggregate_angles`` augments ``ee_aggregate`` with stable angular
     features [cos(theta), cos(phi), sin(phi)] for each electron-nucleus vector.
     """
@@ -362,6 +365,8 @@ def orbital_features_from_components(
         "p_orbital_coulomb_ee12",
         "cartesian_exp_coulomb_ee",
         "interaction_ee_spin",
+        "interaction_ee_spin16",
+        "spin_coulomb_ee16",
         "rich_interaction_ee",
         "p_orbital_spin_ee",
         "spin_coulomb_exp_ee",
@@ -379,6 +384,8 @@ def orbital_features_from_components(
 
     if mode in (
         "interaction_ee_spin",
+        "interaction_ee_spin16",
+        "spin_coulomb_ee16",
         "rich_interaction_ee",
         "p_orbital_spin_ee",
         "spin_coulomb_exp_ee",
@@ -402,8 +409,6 @@ def orbital_features_from_components(
         opposite_mask = (
             spin_labels[:, None] != spin_labels[None, :]
         ).astype(ae.dtype)[..., None] * offdiag
-        exp_kernel = jnp.exp(-r_ee)
-
         def spin_aggregate(mask, kernel):
             weight = mask * kernel
             return jnp.sum(weight, axis=1), jnp.sum(-ee * weight, axis=1)
@@ -414,6 +419,19 @@ def orbital_features_from_components(
         opposite_inv_density, opposite_inv_vector = spin_aggregate(
             opposite_mask, 1.0 / (1.0 + r_ee)
         )
+        if mode in ("interaction_ee_spin16", "spin_coulomb_ee16"):
+            return jnp.concatenate(
+                (
+                    atom_features,
+                    same_inv_density,
+                    same_inv_vector,
+                    opposite_inv_density,
+                    opposite_inv_vector,
+                ),
+                axis=1,
+            )
+
+        exp_kernel = jnp.exp(-r_ee)
         same_exp_density, same_exp_vector = spin_aggregate(same_mask, exp_kernel)
         opposite_exp_density, opposite_exp_vector = spin_aggregate(
             opposite_mask, exp_kernel

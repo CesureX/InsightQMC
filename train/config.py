@@ -6,9 +6,9 @@ def default() -> ml_collections.ConfigDict:
 
     cfg = ml_collections.ConfigDict({
     'batch_size': 8192,
-    'layer_dims': [24, 64, 32, 32, 32, 128],
+    'layer_dims': [8, 80, 40, 40,40,64],
         'g': [10],
-        'k': [4],
+        'k': [7],
         #'grid_range': [[0, 2], [0, 2], [0, 2], [0, 2]],
         'grid_range': [-3, 3],
         'iterations': 300000,
@@ -26,11 +26,11 @@ def default() -> ml_collections.ConfigDict:
         'dft_xc': 'pbe,pbe',
         'dft_grid_level': 3,
         'scf_fraction': 0.0,
-        'nfeatures': 24,
-        'orbital_features': 'interaction_ee_spin',
+        'nfeatures': 8,
+        'orbital_features': 'ee_aggregate',
         'mcmc_method': 'random_walk', # mala: guided/Langevin; random_walk: FermiNet-style Gaussian proposal
         'pretrain_mcmc_method': 'random_walk',
-        'mcmc_steps': 40,
+        'mcmc_steps': 50,
         'mcmc_width': 0.02,
         'pretrain_mcmc_steps': 1,
         'pretrain_mcmc_width': 0.02,
@@ -90,21 +90,19 @@ def default() -> ml_collections.ConfigDict:
         'add_bias': True,
         'external_weights': True,
         'mkan': {
-            # Orbital MKAN receives one electron feature row at a time:
-            # For a one-atom system with orbital_features='interaction_ee_spin':
-            # 1 atom * [ae, r_ae, ae * exp(-Zr), Z/(1 + Zr)]
-            # + same-/opposite-spin ee summaries using 1/(1+r_ij) and exp(-r_ij).
+            # Orbital MKAN receives one electron feature row at a time.
+            # For one-atom Be, orbital_features='ee_aggregate' produces 8 features.
             # With orbital_head enabled, MKAN outputs compact node features and
             # the shared head maps them to 2 * ndeterminants * nelectrons real channels.
             #'layer_type': 'base',       # 原始 KAN B-spline
             # 'layer_type': 'spline',   # efficient KAN spline
-            'layer_type': 'chebyshev',
+            #'layer_type': 'chebyshev',
             # 'layer_type': 'legendre'
             # 'layer_type': 'rbf'
-             #'layer_type': 'sine',
-            #'layer_type': 'fourier',
+            'layer_type': 'sine',
+            # 'layer_type': 'fourier',
             'input_dim': None,
-            'output_dim': 128,
+            'output_dim': 64,
             'stream_merge': {
                 # FermiNet-style propagation: before every MKAN layer, concatenate
                 # local electron features with global/same-spin/opposite-spin means,
@@ -220,7 +218,7 @@ def default() -> ml_collections.ConfigDict:
             'type': 'ferminet_plus', #pade, ferminet, ferminet_plus, ferminet_three_body
         },
         'output': {
-        'root_dir': 'outputs/Be09011636_with_M__4gpu_k5_inputfeaturetry_64_32_32_32_128_chev',
+        'root_dir': 'outputs/Be09022213_with_M__4gpu_D7_inputfeature8_80_40_40_40_64_sin',
             'checkpoint_every': 10000,
             'metrics_every': 5,
             'resume': False,
